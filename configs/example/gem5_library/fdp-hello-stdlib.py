@@ -101,6 +101,18 @@ parser.add_argument(
     help="The ISA to simulate.",
     choices=isa_choices.keys(),
 )
+parser.add_argument(
+    "--pdip",
+    choices=("off", "on"),
+    default="off",
+    help="Enable priority-directed instruction prefetching.",
+)
+parser.add_argument(
+    "--eip",
+    choices=("off", "2k", "4k", "8k"),
+    default="off",
+    help="Enable entangling instruction prefetching with the selected table size.",
+)
 
 parser.add_argument(
     "--workload",
@@ -118,6 +130,12 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+if args.eip != "off" and args.pdip == "on":
+    parser.error("--eip and --pdip select alternative L1I prefetchers")
+
+eip_entries = {"off": 0, "2k": 2048, "4k": 4096, "8k": 8192}
+eip_merge_distance = {"off": 6, "2k": 15, "4k": 6, "8k": 5}
+
 
 # This check ensures the gem5 binary is compiled to the correct ISA target.
 # If not, an exception will be thrown.
@@ -132,6 +150,9 @@ cache_hierarchy = TwoLevelFDPCacheHierarchy(
     l1d_size="32KiB",
     l2_size="1MiB",
     decoupled=not args.disable_fdp,
+    eip_entries=eip_entries[args.eip],
+    eip_merge_distance=eip_merge_distance[args.eip],
+    pdip=args.pdip == "on",
 )
 
 # 2. Decoupled Front-end ------------------------------------------------
@@ -146,7 +167,8 @@ processor = DecoupledProcessor(
 
 print(
     f"Running {args.workload} on {args.isa}, "
-    f"FDP {'disabled' if args.disable_fdp else 'enabled'}"
+    f"FDP {'disabled' if args.disable_fdp else 'enabled'}, "
+    f"PDIP {args.pdip}, EIP {args.eip}"
 )
 
 

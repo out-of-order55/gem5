@@ -28,8 +28,10 @@ from typing import Optional
 
 from m5.objects import (
     BaseXBar,
+    EntanglingPrefetcher,
     FetchDirectedPrefetcher,
     MultiPrefetcher,
+    PriorityDirectedPrefetcher,
     TaggedPrefetcher,
 )
 
@@ -58,6 +60,9 @@ class TwoLevelFDPCacheHierarchy(PrivateL1SharedL2CacheHierarchy):
         l1i_assoc: int = 8,
         l2_assoc: int = 16,
         decoupled: bool = True,
+        eip_entries: int = 0,
+        eip_merge_distance: int = 6,
+        pdip: bool = False,
         membus: Optional[BaseXBar] = None,
     ) -> None:
         """
@@ -83,6 +88,9 @@ class TwoLevelFDPCacheHierarchy(PrivateL1SharedL2CacheHierarchy):
             membus=membus,
         )
         self._decoupled = decoupled
+        self._eip_entries = eip_entries
+        self._eip_merge_distance = eip_merge_distance
+        self._pdip = pdip
 
     @overrides(PrivateL1SharedL2CacheHierarchy)
     def incorporate_cache(self, board: AbstractBoard) -> None:
@@ -93,7 +101,19 @@ class TwoLevelFDPCacheHierarchy(PrivateL1SharedL2CacheHierarchy):
             cpu = board.get_processor().cores[i].core
 
             self.l1icaches[i].prefetcher = MultiPrefetcher()
-            if self._decoupled:
+            if self._eip_entries:
+                pf = EntanglingPrefetcher(
+                    table_entries=self._eip_entries,
+                    merge_distance=self._eip_merge_distance,
+                )
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
+            elif self._pdip:
+                pf = PriorityDirectedPrefetcher(
+                    use_virtual_addresses=False, cpu=cpu
+                )
+                pf.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
+            elif self._decoupled:
                 pf = FetchDirectedPrefetcher(
                     use_virtual_addresses=True, cpu=cpu
                 )
@@ -102,9 +122,9 @@ class TwoLevelFDPCacheHierarchy(PrivateL1SharedL2CacheHierarchy):
                 pf.registerCache(self.l1icaches[i])
                 self.l1icaches[i].prefetcher.prefetchers.append(pf)
 
-            self.l1icaches[i].prefetcher.prefetchers.append(
-                TaggedPrefetcher(use_virtual_addresses=True)
-            )
+                self.l1icaches[i].prefetcher.prefetchers.append(
+                    TaggedPrefetcher(use_virtual_addresses=True)
+                )
 
             for pf in self.l1icaches[i].prefetcher.prefetchers:
                 pf.registerMMU(cpu.mmu)

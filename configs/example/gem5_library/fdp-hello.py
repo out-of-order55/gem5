@@ -63,6 +63,7 @@ from m5.objects import (
     TAGE_SC_L_64KB,
     BranchPredictor,
     EmissaryLRURP,
+    EntanglingPrefetcher,
     FetchDirectedPrefetcher,
     L2XBar,
     LRURP,
@@ -127,6 +128,12 @@ parser.add_argument(
     help="Enable priority-directed instruction prefetching.",
 )
 parser.add_argument(
+    "--eip",
+    choices=("off", "2k", "4k", "8k"),
+    default="off",
+    help="Enable entangling instruction prefetching with the selected table size.",
+)
+parser.add_argument(
     "--l2-rp",
     choices=("lru", "emissary"),
     default="lru",
@@ -167,6 +174,12 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+if args.eip != "off" and args.pdip == "on":
+    parser.error("--eip and --pdip select alternative L1I prefetchers")
+
+eip_entries = {"2k": 2048, "4k": 4096, "8k": 8192}
+eip_merge_distance = {"2k": 15, "4k": 6, "8k": 5}
+
 
 # This check ensures the gem5 binary is compiled to the correct ISA target.
 # If not, an exception will be thrown.
@@ -202,7 +215,22 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
             cpu = board.get_processor().cores[i].core
 
             self.l1icaches[i].prefetcher = MultiPrefetcher()
-            if not args.disable_fdp:
+            if args.eip != "off":
+                pf = EntanglingPrefetcher(
+                    table_entries=eip_entries[args.eip],
+                    merge_distance=eip_merge_distance[args.eip],
+                )
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
+            elif args.pdip == "on":
+                pf = PriorityDirectedPrefetcher(
+                    use_virtual_addresses=False,
+                    cpu=cpu,
+                    table_sets=args.pdip_table_sets,
+                    table_assoc=args.pdip_table_assoc,
+                )
+                pf.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
+            elif not args.disable_fdp:
                 pf = FetchDirectedPrefetcher(
                     use_virtual_addresses=True, cpu=cpu
                 )
@@ -211,20 +239,9 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
                 pf.registerCache(self.l1icaches[i])
                 self.l1icaches[i].prefetcher.prefetchers.append(pf)
 
-            if args.pdip == "on":
-                pf = PriorityDirectedPrefetcher(
-                    # PDIP table targets are physical L1I line addresses.
-                    use_virtual_addresses=False,
-                    cpu=cpu,
-                    table_sets=args.pdip_table_sets,
-                    table_assoc=args.pdip_table_assoc,
+                self.l1icaches[i].prefetcher.prefetchers.append(
+                    TaggedPrefetcher(use_virtual_addresses=True)
                 )
-                pf.registerCache(self.l1icaches[i])
-                self.l1icaches[i].prefetcher.prefetchers.append(pf)
-
-            self.l1icaches[i].prefetcher.prefetchers.append(
-                TaggedPrefetcher(use_virtual_addresses=True)
-            )
 
             for pf in self.l1icaches[i].prefetcher.prefetchers:
                 pf.registerMMU(cpu.mmu)
@@ -362,7 +379,7 @@ for c in processor.cores:
 print(
     f"Running {args.workload} on {args.isa}, "
     f"FDP {'disabled' if args.disable_fdp else 'enabled'}, "
-    f"PDIP {args.pdip}, L2 {args.l2_rp}"
+    f"PDIP {args.pdip}, EIP {args.eip}, L2 {args.l2_rp}"
 )
 
 

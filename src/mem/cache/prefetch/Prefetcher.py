@@ -817,6 +817,27 @@ class PriorityDirectedPrefetcher(BasePrefetcher):
     cache_snoop = Param.Bool(True, "Avoid cache and miss-queue duplicates")
 
 
+class EntanglingPrefetcher(BasePrefetcher):
+    type = "EntanglingPrefetcher"
+    cxx_class = "gem5::prefetch::EntanglingPrefetcher"
+    cxx_header = "mem/cache/prefetch/eip.hh"
+
+    enabled = Param.Bool(True, "Enable EIP training and issuance")
+    table_entries = Param.Unsigned(4096, "Number of EIP source entries")
+    table_assoc = Param.Unsigned(16, "EIP source table associativity")
+    history_entries = Param.Unsigned(16, "History buffer entries")
+    max_basic_block_size = Param.Unsigned(64, "Maximum basic block size")
+    destinations_per_entry = Param.Unsigned(6, "Maximum destinations per source")
+    confidence_bits = Param.Unsigned(2, "Destination confidence counter bits")
+    merge_distance = Param.Unsigned(6, "Basic block merge distance in lines")
+    prefetch_queue_size = Param.Unsigned(32, "Maximum EIP prefetch queue size")
+    latency = Param.Cycles(1, "Latency for generated prefetches")
+    cache_snoop = Param.Bool(True, "Avoid cache and miss-queue duplicates")
+    use_virtual_addresses = Param.Bool(False, "EIP uses physical addresses")
+    on_inst = Param.Bool(True, "Observe instruction accesses")
+    prefetch_on_access = Param.Bool(True, "Observe every instruction access")
+
+
 add_citation(
     FetchDirectedPrefetcher,
     """@inproceedings{10.1145/3613424.3614258,

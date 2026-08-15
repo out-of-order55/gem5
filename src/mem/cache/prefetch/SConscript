@@ -37,7 +37,8 @@ SimObject('Prefetcher.py', sim_objects=[
     'DeltaCorrelatingPredictionTables', 'DCPTPrefetcher',
     'IrregularStreamBufferPrefetcher', 'SlimAMPMPrefetcher',
     'BOPPrefetcher', 'SBOOEPrefetcher', 'STeMSPrefetcher', 'PIFPrefetcher',
-    'FetchDirectedPrefetcher', 'PriorityDirectedPrefetcher'
+    'FetchDirectedPrefetcher', 'PriorityDirectedPrefetcher',
+    'EntanglingPrefetcher'
     ])
 
 Source('access_map_pattern_matching.cc')
@@ -59,3 +60,4 @@ Source('stride.cc')
 Source('tagged.cc')
 Source('fdp.cc')
 Source('pdip.cc')
+Source('eip.cc')

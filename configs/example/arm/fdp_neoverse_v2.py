@@ -69,9 +69,11 @@ from common.cores.arm import neoverse_v2
 from m5.objects import (
     TAGE_SC_L_64KB,
     BranchPredictor,
+    EntanglingPrefetcher,
     FetchDirectedPrefetcher,
     L2XBar,
     MultiPrefetcher,
+    PriorityDirectedPrefetcher,
     SimpleBTB,
     TaggedPrefetcher,
 )
@@ -116,8 +118,26 @@ parser.add_argument(
     action="store_true",
     help="Disable FDP to evaluate baseline performance.",
 )
+parser.add_argument(
+    "--pdip",
+    choices=("off", "on"),
+    default="off",
+    help="Enable priority-directed instruction prefetching.",
+)
+parser.add_argument(
+    "--eip",
+    choices=("off", "2k", "4k", "8k"),
+    default="off",
+    help="Enable entangling instruction prefetching with the selected table size.",
+)
 
 args = parser.parse_args()
+
+if args.eip != "off" and args.pdip == "on":
+    parser.error("--eip and --pdip select alternative L1I prefetchers")
+
+eip_entries = {"2k": 2048, "4k": 4096, "8k": 8192}
+eip_merge_distance = {"2k": 15, "4k": 6, "8k": 5}
 
 
 requires(isa_required=ISA.ARM)
@@ -152,7 +172,19 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
             cpu = board.get_processor().cores[i].core
 
             self.l1icaches[i].prefetcher = MultiPrefetcher()
-            if not args.disable_fdp:
+            if args.eip != "off":
+                pf = EntanglingPrefetcher(
+                    table_entries=eip_entries[args.eip],
+                    merge_distance=eip_merge_distance[args.eip],
+                )
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
+            elif args.pdip == "on":
+                pf = PriorityDirectedPrefetcher(
+                    use_virtual_addresses=False, cpu=cpu
+                )
+                pf.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
+            elif not args.disable_fdp:
                 pf = FetchDirectedPrefetcher(
                     use_virtual_addresses=True, cpu=cpu
                 )
@@ -161,9 +193,9 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
                 pf.registerCache(self.l1icaches[i])
                 self.l1icaches[i].prefetcher.prefetchers.append(pf)
 
-            self.l1icaches[i].prefetcher.prefetchers.append(
-                TaggedPrefetcher(use_virtual_addresses=True)
-            )
+                self.l1icaches[i].prefetcher.prefetchers.append(
+                    TaggedPrefetcher(use_virtual_addresses=True)
+                )
 
             for pf in self.l1icaches[i].prefetcher.prefetchers:
                 pf.registerMMU(cpu.mmu)
