@@ -102,6 +102,11 @@ class TwoLevelFDPCacheHierarchy(PrivateL1SharedL2CacheHierarchy):
 
             self.l1icaches[i].prefetcher = MultiPrefetcher()
             if self._eip_entries:
+                pf = FetchDirectedPrefetcher(
+                    use_virtual_addresses=True, cpu=cpu
+                )
+                pf.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
                 pf = EntanglingPrefetcher(
                     table_entries=self._eip_entries,
                     merge_distance=self._eip_merge_distance,

@@ -216,6 +216,11 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
 
             self.l1icaches[i].prefetcher = MultiPrefetcher()
             if args.eip != "off":
+                pf = FetchDirectedPrefetcher(
+                    use_virtual_addresses=True, cpu=cpu
+                )
+                pf.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
                 pf = EntanglingPrefetcher(
                     table_entries=eip_entries[args.eip],
                     merge_distance=eip_merge_distance[args.eip],
