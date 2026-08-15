@@ -6,8 +6,9 @@
 #include "mem/cache/prefetch/eip.hh"
 
 #include <algorithm>
-#include <limits>
+#include <array>
 
+#include "base/intmath.hh"
 #include "base/logging.hh"
 #include "mem/request.hh"
 #include "params/EntanglingPrefetcher.hh"
@@ -18,6 +19,16 @@ namespace gem5
 namespace prefetch
 {
 
+namespace
+{
+
+constexpr unsigned SourceTagBits = 10;
+constexpr unsigned BasicBlockSizeBits = 6;
+constexpr unsigned MaxPaperBasicBlockSize = (1U << BasicBlockSizeBits) - 1;
+constexpr unsigned ConfidenceThreshold = 1;
+
+}
+
 EntanglingPrefetcher::EntanglingPrefetcher(const Params &p)
   : Base(p), stats(this), enabled(p.enabled), tableEntries(p.table_entries),
     tableAssoc(p.table_assoc), historyEntries(p.history_entries),
@@ -25,27 +36,37 @@ EntanglingPrefetcher::EntanglingPrefetcher(const Params &p)
     destinationsPerEntry(p.destinations_per_entry),
     confidenceBits(p.confidence_bits), mergeDistance(p.merge_distance),
     queueSize(p.prefetch_queue_size), latency(p.latency),
-    cacheSnoop(p.cache_snoop),
-    table(std::max(1u, static_cast<unsigned>(p.table_entries)),
-          TableEntry()),
-    setVictim(std::max(1u, static_cast<unsigned>(p.table_entries) /
-                       std::max(1u, p.table_assoc)), 0)
+    cacheSnoop(p.cache_snoop), table(p.table_entries),
+    setVictim(std::max(1U, p.table_entries / p.table_assoc), 0),
+    history(p.history_entries)
 {
-    fatal_if(tableAssoc == 0, "EntanglingPrefetcher table_assoc must be > 0");
-    fatal_if(historyEntries == 0, "EntanglingPrefetcher history_entries must be > 0");
-    fatal_if(maxBasicBlockSize == 0,
-             "EntanglingPrefetcher max_basic_block_size must be > 0");
-    fatal_if(destinationsPerEntry == 0,
-             "EntanglingPrefetcher destinations_per_entry must be > 0");
-    fatal_if(confidenceBits == 0 || confidenceBits > 8,
-             "EntanglingPrefetcher confidence_bits must be in [1, 8]");
+    fatal_if(tableAssoc != 16,
+             "EntanglingPrefetcher requires the paper's 16-way table");
+    fatal_if(tableEntries == 0 || tableEntries % tableAssoc != 0,
+             "EntanglingPrefetcher table_entries must be a multiple of 16");
+    const unsigned sets = tableEntries / tableAssoc;
+    fatal_if((sets & (sets - 1)) != 0,
+             "EntanglingPrefetcher table set count must be a power of two");
+    fatal_if(historyEntries != 16,
+             "EntanglingPrefetcher requires the paper's 16-entry history");
+    fatal_if(maxBasicBlockSize != MaxPaperBasicBlockSize,
+             "EntanglingPrefetcher basic-block size must use 6 bits (63)");
+    fatal_if(destinationsPerEntry != PhysicalDestinationFormats,
+             "Physical-address EIP requires four compressed destinations");
+    fatal_if(confidenceBits != 2,
+             "EntanglingPrefetcher requires 2-bit confidence counters");
     fatal_if(queueSize == 0, "EntanglingPrefetcher prefetch_queue_size must be > 0");
-    const unsigned sets = std::max(1u, tableEntries / tableAssoc);
-    table.resize(sets * tableAssoc);
-    setVictim.resize(sets, 0);
-    stats.logicalStorageBytes =
-        (tableEntries * (64 + 8 + destinationsPerEntry * (64 + 8 + confidenceBits))
-         + historyEntries * (64 + 8 + 64)) / 8;
+
+    // Physical-address table: 10-bit source tag, 6-bit block size, and a
+    // 46-bit compressed destination field.  The timing metadata is modeled
+    // separately, as in the paper's PQ/MSHR/L1I extensions.
+    const unsigned setBits = floorLog2(sets);
+    const uint64_t tableBits = uint64_t(tableEntries) *
+        (SourceTagBits + BasicBlockSizeBits + 46);
+    const uint64_t historyBits = uint64_t(historyEntries) * (42 + 20 + 6) + 4;
+    const uint64_t timingBits = uint64_t(queueSize + 12 + 64) *
+        (12 + 4 + setBits + 4 + 1);
+    stats.logicalStorageBytes = (tableBits + historyBits + timingBits + 7) / 8;
 }
 
 EntanglingPrefetcher::~EntanglingPrefetcher()
@@ -85,11 +106,15 @@ EntanglingPrefetcher::regProbeListeners()
 EntanglingPrefetcher::Stats::Stats(statistics::Group *parent)
   : statistics::Group(parent),
     ADD_STAT(basicBlocksObserved, statistics::units::Count::get(),
-             "Observed dynamic instruction basic blocks"),
+             "Completed dynamic instruction basic blocks"),
     ADD_STAT(historyInsertions, statistics::units::Count::get(),
-             "Basic blocks inserted into the history buffer"),
+             "Basic-block heads inserted into the history buffer"),
     ADD_STAT(historyMerges, statistics::units::Count::get(),
-             "History entries merged by proximity"),
+             "Basic blocks merged into a recent history entry"),
+    ADD_STAT(historyLookupHits, statistics::units::Count::get(),
+             "Latency-qualified history sources"),
+    ADD_STAT(historyLookupMisses, statistics::units::Count::get(),
+             "Fills without a latency-qualified history source"),
     ADD_STAT(tableLookups, statistics::units::Count::get(),
              "Entangled table lookups"),
     ADD_STAT(tableHits, statistics::units::Count::get(),
@@ -97,39 +122,59 @@ EntanglingPrefetcher::Stats::Stats(statistics::Group *parent)
     ADD_STAT(tableInsertions, statistics::units::Count::get(),
              "Entangled table insertions"),
     ADD_STAT(tableReplacements, statistics::units::Count::get(),
-             "Entangled table replacements"),
+             "FIFO entangled table replacements"),
+    ADD_STAT(tableRelocations, statistics::units::Count::get(),
+             "FIFO victims reallocated to an empty destination entry"),
     ADD_STAT(entanglementInsertions, statistics::units::Count::get(),
              "Source/destination pairs inserted"),
     ADD_STAT(entanglementEvictions, statistics::units::Count::get(),
-             "Source/destination pairs evicted"),
+             "Destination pairs evicted by compression capacity"),
     ADD_STAT(prefetchCandidates, statistics::units::Count::get(),
              "Generated prefetch candidates"),
     ADD_STAT(prefetchIssued, statistics::units::Count::get(),
              "Issued EIP prefetches"),
     ADD_STAT(timelyPrefetches, statistics::units::Count::get(),
-             "Demand accesses covered by EIP prefetches"),
+             "Demand hits on EIP-prefetched destination heads"),
     ADD_STAT(latePrefetches, statistics::units::Count::get(),
-             "Late EIP prefetches"),
+             "Demand misses coalescing with EIP prefetches"),
     ADD_STAT(wrongPrefetches, statistics::units::Count::get(),
-             "Unused EIP prefetches evicted"),
+             "Unused EIP-prefetched destination heads evicted"),
     ADD_STAT(confidenceIncrements, statistics::units::Count::get(),
              "Destination confidence increments"),
     ADD_STAT(confidenceDecrements, statistics::units::Count::get(),
              "Destination confidence decrements"),
     ADD_STAT(demandInstructionMisses, statistics::units::Count::get(),
              "Demand instruction misses observed"),
-    ADD_STAT(coveredInstructionMisses, statistics::units::Count::get(),
-             "Demand instruction misses covered by EIP"),
+    ADD_STAT(fillTrainingEvents, statistics::units::Count::get(),
+             "Miss fills that added an entanglement"),
+    ADD_STAT(trainingWithoutHistory, statistics::units::Count::get(),
+             "Miss fills without a valid history pointer"),
     ADD_STAT(logicalStorageBytes, statistics::units::Byte::get(),
-             "Estimated logical EIP storage")
+             "Paper-style physical-address EIP storage estimate")
 {
 }
 
 unsigned
 EntanglingPrefetcher::tableSet(Addr source) const
 {
-    const unsigned sets = table.size() / tableAssoc;
-    return sets ? (static_cast<unsigned>((source >> lBlkSize) % sets)) : 0;
+    const Addr line = source >> lBlkSize;
+    const Addr hash = line ^ (line >> 2) ^ (line >> 5);
+    return hash & ((tableEntries / tableAssoc) - 1);
+}
+
+Addr
+EntanglingPrefetcher::tableTag(Addr source) const
+{
+    const Addr line = source >> lBlkSize;
+    const Addr hash = line ^ (line >> 2) ^ (line >> 5);
+    const unsigned setBits = floorLog2(tableEntries / tableAssoc);
+    return (hash >> setBits) & ((Addr(1) << SourceTagBits) - 1);
+}
+
+Tick
+EntanglingPrefetcher::currentCycle() const
+{
+    return curTick() / clockPeriod();
 }
 
 EntanglingPrefetcher::TableEntry *
@@ -137,9 +182,10 @@ EntanglingPrefetcher::findEntry(Addr source)
 {
     const unsigned set = tableSet(source);
     const unsigned begin = set * tableAssoc;
-    for (unsigned way = 0; way < tableAssoc && begin + way < table.size(); ++way) {
+    const Addr tag = tableTag(source);
+    for (unsigned way = 0; way < tableAssoc; ++way) {
         auto &entry = table[begin + way];
-        if (entry.valid && entry.source == source)
+        if (entry.valid && entry.tag == tag)
             return &entry;
     }
     return nullptr;
@@ -151,265 +197,576 @@ EntanglingPrefetcher::findEntry(Addr source) const
     return const_cast<EntanglingPrefetcher *>(this)->findEntry(source);
 }
 
-void
-EntanglingPrefetcher::insertHistory(const HistoryEntry &entry)
+EntanglingPrefetcher::TableEntry &
+EntanglingPrefetcher::allocateEntry(Addr source)
 {
-    if (!history.empty() &&
-        entry.head <= history.back().head + mergeDistance * blkSize &&
-        entry.head + entry.size * blkSize >= history.back().head) {
-        stats.historyMerges++;
-    }
-    history.push_back(entry);
-    if (history.size() > historyEntries)
-        history.pop_front();
-    stats.historyInsertions++;
-}
+    const unsigned set = tableSet(source);
+    const unsigned begin = set * tableAssoc;
+    const unsigned way = setVictim[set];
+    auto &victim = table[begin + way];
 
-void
-EntanglingPrefetcher::train(const HistoryEntry &entry)
-{
-    if (history.empty())
-        return;
-    const HistoryEntry *source = nullptr;
-    for (auto it = history.rbegin(); it != history.rend(); ++it) {
-        if (it->firstTick <= entry.firstTick &&
-            entry.head <= it->head + mergeDistance * blkSize &&
-            entry.head + entry.size * blkSize >= it->head) {
-            source = &*it;
-            break;
-        }
-    }
-    if (!source)
-        source = &history.back();
-
-    TableEntry *tableEntry = findEntry(source->head);
-    if (!tableEntry) {
-        const unsigned set = tableSet(source->head);
-        const unsigned begin = set * tableAssoc;
-        unsigned victim = setVictim[set]++ % tableAssoc;
-        tableEntry = &table[begin + victim];
-        if (tableEntry->valid) {
-            stats.tableReplacements++;
-            stats.entanglementEvictions += tableEntry->destinations.size();
-        } else {
-            stats.tableInsertions++;
-        }
-        *tableEntry = TableEntry();
-        tableEntry->valid = true;
-        tableEntry->source = source->head;
-    }
-    tableEntry->maxSize = std::max(tableEntry->maxSize, source->size);
-    auto found = std::find_if(tableEntry->destinations.begin(),
-                              tableEntry->destinations.end(),
-                              [&entry](const Destination &d) {
-                                  return d.head == entry.head;
-                              });
-    const unsigned maxConfidence = (1u << confidenceBits) - 1;
-    if (found != tableEntry->destinations.end()) {
-        found->size = entry.size;
-        found->confidence = maxConfidence;
-        found->lastUpdate = curTick();
-    } else {
-        if (tableEntry->destinations.size() >= destinationsPerEntry) {
-            auto victim = std::min_element(
-                tableEntry->destinations.begin(), tableEntry->destinations.end(),
-                [](const Destination &a, const Destination &b) {
-                    return a.confidence < b.confidence;
-                });
-            if (victim != tableEntry->destinations.end()) {
-                stats.entanglementEvictions++;
-                *victim = Destination{entry.head, entry.size, maxConfidence,
-                                      curTick()};
+    if (victim.valid) {
+        // Enhanced FIFO from the paper: relocate a FIFO victim to a way
+        // without destinations, preferring a way without a block size.
+        if (!victim.destinations.empty() || victim.size != 0) {
+            TableEntry *relocation = nullptr;
+            for (unsigned offset = 1; offset < tableAssoc; ++offset) {
+                auto &candidate = table[begin + (way + offset) % tableAssoc];
+                if (!candidate.valid || candidate.destinations.empty()) {
+                    if (!candidate.valid || candidate.size == 0) {
+                        relocation = &candidate;
+                        break;
+                    }
+                    if (!relocation)
+                        relocation = &candidate;
+                }
             }
-        } else {
-            tableEntry->destinations.push_back(
-                Destination{entry.head, entry.size, maxConfidence, curTick()});
+            if (relocation &&
+                (!relocation->valid || relocation->size == 0 ||
+                 !victim.destinations.empty())) {
+                *relocation = victim;
+                stats.tableRelocations++;
+            }
         }
-        stats.entanglementInsertions++;
+        stats.tableReplacements++;
+        stats.entanglementEvictions += victim.destinations.size();
+    } else {
+        stats.tableInsertions++;
     }
+
+    victim = TableEntry();
+    victim.valid = true;
+    victim.source = source;
+    victim.tag = tableTag(source);
+    setVictim[set] = (way + 1) % tableAssoc;
+    return victim;
+}
+
+unsigned
+EntanglingPrefetcher::destinationFormat(Addr source, Addr destination) const
+{
+    constexpr std::array<unsigned, PhysicalDestinationFormats> significant =
+        {42, 20, 12, 9};
+    const Addr sourceLine = source >> lBlkSize;
+    const Addr destinationLine = destination >> lBlkSize;
+    for (unsigned format = PhysicalDestinationFormats; format > 0; --format) {
+        const unsigned bits = significant[format - 1];
+        if ((sourceLine >> bits) == (destinationLine >> bits))
+            return format;
+    }
+    return 1;
+}
+
+Addr
+EntanglingPrefetcher::compressDestination(Addr destination,
+                                          unsigned format) const
+{
+    constexpr std::array<unsigned, PhysicalDestinationFormats> significant =
+        {42, 20, 12, 9};
+    const unsigned bits = significant.at(format - 1);
+    return (destination >> lBlkSize) & ((Addr(1) << bits) - 1);
+}
+
+Addr
+EntanglingPrefetcher::expandDestination(Addr source, Addr encoded,
+                                        unsigned format) const
+{
+    constexpr std::array<unsigned, PhysicalDestinationFormats> significant =
+        {42, 20, 12, 9};
+    const unsigned bits = significant.at(format - 1);
+    const Addr sourceLine = source >> lBlkSize;
+    return ((sourceLine & ~((Addr(1) << bits) - 1)) | encoded) << lBlkSize;
 }
 
 void
-EntanglingPrefetcher::finishCurrentBlock(Tick now)
+EntanglingPrefetcher::setDestinationFormat(TableEntry &entry,
+                                           unsigned format)
 {
-    if (!haveCurrent || currentSize == 0)
+    if (entry.format == format)
         return;
-    HistoryEntry entry{currentHead, currentSize, currentFirstTick};
-    stats.basicBlocksObserved++;
-    train(entry);
-    insertHistory(entry);
-    currentLastLine = 0;
+
+    for (auto &destination : entry.destinations) {
+        const Addr head = expandDestination(entry.source, destination.encoded,
+                                            entry.format);
+        destination.encoded = compressDestination(head, format);
+    }
+    entry.format = format;
+}
+
+void
+EntanglingPrefetcher::updateBasicBlock(Addr head, unsigned size)
+{
+    if (size == 0)
+        return;
+    auto *entry = findEntry(head);
+    if (!entry)
+        entry = &allocateEntry(head);
+    entry->size = std::max(entry->size, size);
+}
+
+void
+EntanglingPrefetcher::recomputeDestinationFormat(TableEntry &entry)
+{
+    if (entry.destinations.empty()) {
+        entry.format = 1;
+        return;
+    }
+
+    unsigned format = PhysicalDestinationFormats;
+    for (const auto &destination : entry.destinations) {
+        format = std::min(format,
+            destinationFormat(entry.source, expandDestination(entry.source,
+                destination.encoded, entry.format)));
+    }
+    setDestinationFormat(entry, format);
+}
+
+bool
+EntanglingPrefetcher::canInsertWithoutEviction(Addr source,
+                                                Addr destination) const
+{
+    const auto *entry = findEntry(source);
+    if (!entry)
+        return false;
+    if (std::any_of(entry->destinations.begin(), entry->destinations.end(),
+                    [this, source, entry, destination](
+                        const Destination &known) {
+                        return expandDestination(source, known.encoded,
+                            entry->format) == destination;
+                    })) {
+        return true;
+    }
+    unsigned format = destinationFormat(source, destination);
+    for (const auto &known : entry->destinations) {
+        format = std::min(format, destinationFormat(source,
+            expandDestination(source, known.encoded, entry->format)));
+    }
+    return entry->destinations.size() + 1 <= format;
+}
+
+void
+EntanglingPrefetcher::addEntanglement(Addr source, Addr destination)
+{
+    auto *entry = findEntry(source);
+    if (!entry)
+        entry = &allocateEntry(source);
+
+    const unsigned maxConfidence = (1U << confidenceBits) - 1;
+    auto known = std::find_if(entry->destinations.begin(),
+                              entry->destinations.end(),
+                              [this, source, entry, destination](
+                                  const Destination &item) {
+                                  return expandDestination(source, item.encoded,
+                                      entry->format) == destination;
+                              });
+    if (known != entry->destinations.end()) {
+        known->confidence = maxConfidence;
+        return;
+    }
+
+    unsigned format = destinationFormat(source, destination);
+    for (const auto &knownDestination : entry->destinations) {
+        format = std::min(format,
+            destinationFormat(source, expandDestination(source,
+                knownDestination.encoded, entry->format)));
+    }
+    while (entry->destinations.size() + 1 > format) {
+        const auto victim = std::min_element(entry->destinations.begin(),
+                                             entry->destinations.end(),
+            [](const Destination &lhs, const Destination &rhs) {
+                return lhs.confidence < rhs.confidence;
+            });
+        entry->destinations.erase(victim);
+        stats.entanglementEvictions++;
+        recomputeDestinationFormat(*entry);
+        format = destinationFormat(source, destination);
+        for (const auto &knownDestination : entry->destinations) {
+            format = std::min(format,
+                destinationFormat(source, expandDestination(source,
+                    knownDestination.encoded, entry->format)));
+        }
+    }
+    setDestinationFormat(*entry, format);
+    entry->destinations.push_back(
+        {compressDestination(destination, entry->format), maxConfidence});
+    stats.entanglementInsertions++;
+}
+
+int
+EntanglingPrefetcher::findHistory(Addr head) const
+{
+    for (unsigned count = 0; count < historyCount; ++count) {
+        const unsigned index = (historyHead + historyEntries - 1 - count) %
+            historyEntries;
+        if (history[index].valid && history[index].head == head)
+            return index;
+    }
+    return InvalidHistory;
+}
+
+int
+EntanglingPrefetcher::insertHistory(Addr head)
+{
+    const unsigned position = historyHead;
+    history[position] = {true, head, 0, currentCycle()};
+    historyHead = (historyHead + 1) % historyEntries;
+    historyCount = std::min(historyCount + 1, historyEntries);
+    stats.historyInsertions++;
+    return position;
+}
+
+void
+EntanglingPrefetcher::updateHistorySize(Addr head, unsigned size)
+{
+    const int position = findHistory(head);
+    if (position != InvalidHistory)
+        history[position].size = std::max(history[position].size, size);
+}
+
+unsigned
+EntanglingPrefetcher::findMergeOffset(Addr head) const
+{
+    const unsigned searches = std::min(mergeDistance, historyCount);
+    for (unsigned count = 0; count < searches; ++count) {
+        const unsigned index = (historyHead + historyEntries - 1 - count) %
+            historyEntries;
+        const auto &candidate = history[index];
+        if (!candidate.valid || head <= candidate.head)
+            continue;
+        const Addr distance = head - candidate.head;
+        if (distance % blkSize == 0 && distance / blkSize <= candidate.size)
+            return distance / blkSize;
+    }
+    return 0;
+}
+
+int
+EntanglingPrefetcher::beginBasicBlock(Addr line, bool isMiss)
+{
+    currentHead = line;
+    currentLastLine = line;
     currentSize = 0;
-    currentHead = 0;
-    currentFirstTick = now;
+    currentMergeOffset = findMergeOffset(line);
+    haveCurrent = true;
+
+    if (currentMergeOffset) {
+        stats.historyMerges++;
+        return InvalidHistory;
+    }
+
+    // Paper behavior: retain the first occurrence of a head, but retain a
+    // fresh occurrence when a miss reaches the head and its outstanding
+    // request has not already been accessed by a demand.
+    const auto timing = timingMSHR.find(line);
+    const bool alreadyAccessed = timing != timingMSHR.end() &&
+        timing->second.accessed;
+    if (findHistory(line) == InvalidHistory || (isMiss && !alreadyAccessed))
+        return insertHistory(line);
+    return InvalidHistory;
+}
+
+void
+EntanglingPrefetcher::finishCurrentBlock()
+{
+    if (!haveCurrent)
+        return;
+
+    stats.basicBlocksObserved++;
+    if (currentSize) {
+        const Addr mergedHead = currentHead - currentMergeOffset * blkSize;
+        const unsigned mergedSize = std::min(maxBasicBlockSize,
+            currentSize + currentMergeOffset);
+        updateBasicBlock(mergedHead, mergedSize);
+        updateHistorySize(mergedHead, mergedSize);
+    }
     haveCurrent = false;
 }
 
+int
+EntanglingPrefetcher::observeBasicBlock(Addr line, bool isMiss)
+{
+    if (!haveCurrent)
+        return beginBasicBlock(line, isMiss);
+    if (line == currentLastLine)
+        return InvalidHistory;
+    if (line == currentLastLine + blkSize && currentSize < maxBasicBlockSize) {
+        currentLastLine = line;
+        ++currentSize;
+        return InvalidHistory;
+    }
+
+    finishCurrentBlock();
+    return beginBasicBlock(line, isMiss);
+}
+
+std::optional<Addr>
+EntanglingPrefetcher::findTimelySource(Addr destination, int historyPos,
+                                       Tick missStart, Tick missLatency,
+                                       unsigned skip)
+{
+    if (historyPos == InvalidHistory || !history[historyPos].valid ||
+        history[historyPos].head != destination) {
+        stats.historyLookupMisses++;
+        return std::nullopt;
+    }
+
+    unsigned skipped = 0;
+    for (unsigned count = 1; count < historyCount; ++count) {
+        const unsigned index = (historyPos + historyEntries - count) %
+            historyEntries;
+        const auto &candidate = history[index];
+        if (!candidate.valid)
+            continue;
+        // A repeated destination in the retained window means the original
+        // head was evicted and revisited; the paper does not entangle it.
+        if (candidate.head == destination) {
+            stats.historyLookupMisses++;
+            return std::nullopt;
+        }
+        if (candidate.firstTick <= missStart &&
+            missStart - candidate.firstTick >= missLatency) {
+            if (skipped++ == skip) {
+                stats.historyLookupHits++;
+                return candidate.head;
+            }
+        }
+    }
+    stats.historyLookupMisses++;
+    return std::nullopt;
+}
+
 void
-EntanglingPrefetcher::enqueue(Addr address, Addr source, Addr destination,
+EntanglingPrefetcher::trainAtFill(Addr destination,
+                                  const TimingEntry &timing)
+{
+    if (!timing.accessed || timing.historyPos == InvalidHistory) {
+        stats.trainingWithoutHistory++;
+        return;
+    }
+
+    const Tick missLatency = currentCycle() - timing.issueTick;
+    for (unsigned skip = 0; skip < 2; ++skip) {
+        const auto source = findTimelySource(destination, timing.historyPos,
+                                              timing.issueTick, missLatency,
+                                              skip);
+        if (source && *source != destination &&
+            canInsertWithoutEviction(*source, destination)) {
+            addEntanglement(*source, destination);
+            stats.fillTrainingEvents++;
+            return;
+        }
+    }
+
+    const auto source = findTimelySource(destination, timing.historyPos,
+                                          timing.issueTick, missLatency, 0);
+    if (source && *source != destination) {
+        addEntanglement(*source, destination);
+        stats.fillTrainingEvents++;
+    }
+}
+
+void
+EntanglingPrefetcher::enqueue(Addr address, const SourceRef &source,
                               const PrefetchInfo &pfi,
                               const CacheAccessor &cache)
 {
-    if (queue.size() >= queueSize || pending.count(address))
+    const Addr line = blockAddress(address);
+    const bool queued = std::any_of(queue.begin(), queue.end(),
+        [line](const QueuedPacket &candidate) {
+            return candidate.address == line;
+        });
+    if (queue.size() >= queueSize || queued || timingMSHR.count(line) ||
+        timingCache.count(line)) {
         return;
-    if (cacheSnoop && (cache.inCache(address, pfi.isSecure()) ||
-                       cache.inMissQueue(address, pfi.isSecure())))
+    }
+    if (cacheSnoop && (cache.inCache(line, pfi.isSecure()) ||
+                       cache.inMissQueue(line, pfi.isSecure()))) {
         return;
-    RequestPtr req = std::make_shared<Request>(address, blkSize,
+    }
+
+    RequestPtr req = std::make_shared<Request>(line, blkSize,
         Request::INST_FETCH, requestorId);
     req->setFlags(Request::PREFETCH);
     req->taskId(context_switch_task_id::Prefetcher);
     PacketPtr pkt = new Packet(req, MemCmd::HardPFReq);
     pkt->allocate();
-    PendingPrefetch meta{source, destination, curTick(), false};
-    queue.push_back(QueuedPacket{pkt, curTick() + clockPeriod() * latency, meta});
-    pending[address] = meta;
+    // PQ timing metadata becomes MSHR metadata only after the prefetch is
+    // issued, matching Figure 4 of the paper.
+    queue.push_back({pkt, line, curTick() + clockPeriod() * latency, source});
 }
 
 void
-EntanglingPrefetcher::issueFor(const PrefetchInfo &pfi,
+EntanglingPrefetcher::issueFor(Addr line, const PrefetchInfo &pfi,
                                const CacheAccessor &cache)
 {
-    TableEntry *entry = findEntry(currentHead);
     stats.tableLookups++;
+    auto *entry = findEntry(line);
     if (!entry)
         return;
     stats.tableHits++;
-    const Addr line = blockAddress(pfi.getPaddr());
-    const Addr end = currentHead +
-        std::min(currentSize, entry->maxSize) * blkSize;
-    for (Addr addr = line + blkSize; addr < end; addr += blkSize) {
+
+    const unsigned set = tableSet(line);
+    const unsigned way = entry - &table[set * tableAssoc];
+    const SourceRef source{set, way, true};
+
+    // The stored size is the number of lines following the source head.
+    for (unsigned i = 1; i <= entry->size; ++i) {
         stats.prefetchCandidates++;
-        enqueue(addr, currentHead, currentHead, pfi, cache);
+        enqueue(line + i * blkSize, SourceRef{}, pfi, cache);
     }
-    for (const auto &dst : entry->destinations) {
-        if (!dst.confidence)
+
+    for (const auto &destination : entry->destinations) {
+        const Addr destinationHead = expandDestination(line,
+            destination.encoded, entry->format);
+        if (destination.confidence < ConfidenceThreshold ||
+            destinationHead == line) {
             continue;
-        for (unsigned i = 0; i < dst.size; ++i) {
-            const Addr addr = dst.head + i * blkSize;
+        }
+        stats.tableLookups++;
+        const auto *destinationEntry = findEntry(destinationHead);
+        if (destinationEntry)
+            stats.tableHits++;
+        const unsigned size = destinationEntry ? destinationEntry->size : 0;
+        for (unsigned i = 0; i <= size; ++i) {
             stats.prefetchCandidates++;
-            enqueue(addr, currentHead, dst.head, pfi, cache);
+            // Only the destination head carries the source reference used
+            // for confidence updates, matching the paper's timing metadata.
+            enqueue(destinationHead + i * blkSize,
+                    i == 0 ? source : SourceRef{}, pfi, cache);
         }
     }
 }
 
 void
-EntanglingPrefetcher::adjustConfidence(Addr source, Addr destination,
-                                       bool increment)
+EntanglingPrefetcher::adjustConfidence(const SourceRef &source,
+                                       Addr destination, bool increment)
 {
-    TableEntry *entry = findEntry(source);
-    if (!entry)
+    if (!source.valid || source.set >= setVictim.size() ||
+        source.way >= tableAssoc) {
         return;
-    auto it = std::find_if(entry->destinations.begin(), entry->destinations.end(),
-                           [destination](const Destination &d) {
-                               return d.head == destination;
-                           });
-    if (it == entry->destinations.end())
+    }
+    auto &entry = table[source.set * tableAssoc + source.way];
+    if (!entry.valid)
         return;
-    const unsigned maxConfidence = (1u << confidenceBits) - 1;
+    const auto found = std::find_if(entry.destinations.begin(),
+                                    entry.destinations.end(),
+        [this, &entry, destination](const Destination &item) {
+            return item.encoded == compressDestination(destination,
+                                                        entry.format);
+        });
+    if (found == entry.destinations.end())
+        return;
+
+    const unsigned maxConfidence = (1U << confidenceBits) - 1;
     if (increment) {
-        if (it->confidence < maxConfidence) {
-            ++it->confidence;
+        if (found->confidence < maxConfidence) {
+            ++found->confidence;
             stats.confidenceIncrements++;
         }
-    } else if (it->confidence) {
-        --it->confidence;
+    } else if (found->confidence) {
+        --found->confidence;
         stats.confidenceDecrements++;
-        if (!it->confidence) {
-            entry->destinations.erase(it);
+        if (!found->confidence) {
+            entry.destinations.erase(found);
+            recomputeDestinationFormat(entry);
             stats.entanglementEvictions++;
         }
     }
 }
 
 void
-EntanglingPrefetcher::removePending(Addr address)
+EntanglingPrefetcher::observeDemandMiss(Addr line, int historyPos)
 {
-    pending.erase(blockAddress(address));
+    stats.demandInstructionMisses++;
+    const auto existing = timingMSHR.find(line);
+    if (existing == timingMSHR.end()) {
+        timingMSHR.emplace(line,
+            TimingEntry{currentCycle(), historyPos, SourceRef{}, true});
+        return;
+    }
+
+    auto &timing = existing->second;
+    if (!timing.accessed) {
+        stats.latePrefetches++;
+        pfHitInMSHR();
+        adjustConfidence(timing.source, line, false);
+        timing.source.valid = false;
+    }
+    timing.accessed = true;
+    timing.historyPos = historyPos;
+}
+
+void
+EntanglingPrefetcher::observeDemandHit(Addr line)
+{
+    const auto existing = timingCache.find(line);
+    if (existing == timingCache.end())
+        return;
+
+    auto &timing = existing->second;
+    if (!timing.accessed && timing.source.valid) {
+        stats.timelyPrefetches++;
+        usefulPrefetches++;
+        prefetchStats.pfUseful++;
+        adjustConfidence(timing.source, line, true);
+        timing.source.valid = false;
+    }
+    timing.accessed = true;
 }
 
 void
 EntanglingPrefetcher::notify(const CacheAccessProbeArg &arg,
                              const PrefetchInfo &pfi)
 {
-    // Child prefetchers may not receive the normal startup callback when
-    // attached through MultiPrefetcher, so publish this derived statistic on
-    // the first observed cache event after the stats reset.
-    stats.logicalStorageBytes =
-        (tableEntries * (64 + 8 + destinationsPerEntry *
-                         (64 + 8 + confidenceBits)) +
-         historyEntries * (64 + 8 + 64)) / 8;
-    // EIP is attached only to L1I.  The cache probe packet can lose the
-    // INST_FETCH request flag while retaining the instruction-cache
-    // requestor, so the cache binding itself is the instruction filter.
     if (!enabled || arg.pkt->req->isPrefetch())
         return;
-    const Addr line = blockAddress(pfi.getPaddr());
-    auto pendingIt = pending.find(line);
-    const bool covered = pendingIt != pending.end() &&
-        arg.cache.hasBeenPrefetched(line, arg.pkt->isSecure(), requestorId);
-    if (pfi.isCacheMiss()) {
-        stats.demandInstructionMisses++;
-        if (pendingIt != pending.end()) {
-            stats.latePrefetches++;
-            pfHitInMSHR();
-            adjustConfidence(pendingIt->second.source,
-                             pendingIt->second.destination, false);
-            removePending(line);
-        }
-    } else if (covered) {
-        stats.timelyPrefetches++;
-        stats.coveredInstructionMisses++;
-        usefulPrefetches++;
-        prefetchStats.pfUseful++;
-        adjustConfidence(pendingIt->second.source,
-                         pendingIt->second.destination, true);
-        removePending(line);
-    }
 
-    if (!haveCurrent) {
-        currentHead = line;
-        currentLastLine = line;
-        currentSize = 1;
-        currentFirstTick = curTick();
-        haveCurrent = true;
-    } else if (line == currentLastLine + blkSize &&
-               currentSize < maxBasicBlockSize) {
-        currentLastLine = line;
-        ++currentSize;
-    } else if (line != currentLastLine) {
-        finishCurrentBlock(curTick());
-        currentHead = line;
-        currentLastLine = line;
-        currentSize = 1;
-        currentFirstTick = curTick();
-        haveCurrent = true;
-    }
-    issueFor(pfi, arg.cache);
+    const Addr line = blockAddress(pfi.getPaddr());
+    const int historyPos = observeBasicBlock(line, pfi.isCacheMiss());
+    if (pfi.isCacheMiss())
+        observeDemandMiss(line, historyPos);
+    else
+        observeDemandHit(line);
+
+    // A table lookup is keyed by the accessed line, so only a basic-block
+    // head can trigger its own entanglements.
+    issueFor(line, pfi, arg.cache);
 }
 
 void
 EntanglingPrefetcher::notifyFill(const CacheAccessProbeArg &arg)
 {
-    if (arg.pkt->req->isPrefetch()) {
-        auto it = pending.find(blockAddress(arg.pkt->getAddr()));
-        if (it != pending.end())
-            it->second.filled = true;
-    }
+    const Addr line = blockAddress(arg.pkt->getAddr());
+    const auto found = timingMSHR.find(line);
+    if (found == timingMSHR.end())
+        return;
+
+    TimingEntry timing = found->second;
+    timingMSHR.erase(found);
+    trainAtFill(line, timing);
+    // Only destination heads need to persist metadata in the timing-cache
+    // table for timely/wrong confidence feedback.
+    if (timing.source.valid)
+        timingCache[line] = timing;
 }
 
 void
 EntanglingPrefetcher::notifyEvict(const CacheDataUpdateProbeArg &info)
 {
-    if (!info.hwPrefetched)
+    if (!info.newData.empty())
         return;
+
     const Addr line = blockAddress(info.addr);
-    auto it = pending.find(line);
-    if (it != pending.end()) {
+    const auto found = timingCache.find(line);
+    if (found == timingCache.end())
+        return;
+
+    if (!found->second.accessed && found->second.source.valid) {
         stats.wrongPrefetches++;
-        adjustConfidence(it->second.source, it->second.destination, false);
-        removePending(line);
+        prefetchUnused();
+        adjustConfidence(found->second.source, line, false);
     }
+    timingCache.erase(found);
 }
 
 PacketPtr
@@ -417,12 +774,17 @@ EntanglingPrefetcher::getPacket()
 {
     if (queue.empty() || queue.front().readyTick > curTick())
         return nullptr;
-    PacketPtr pkt = queue.front().pkt;
+
+    auto queued = queue.front();
     queue.pop_front();
+    if (!timingMSHR.count(queued.address)) {
+        timingMSHR.emplace(queued.address,
+            TimingEntry{currentCycle(), InvalidHistory, queued.source, false});
+    }
     stats.prefetchIssued++;
     prefetchStats.pfIssued++;
     issuedPrefetches++;
-    return pkt;
+    return queued.pkt;
 }
 
 Tick

@@ -826,10 +826,16 @@ class EntanglingPrefetcher(BasePrefetcher):
     table_entries = Param.Unsigned(4096, "Number of EIP source entries")
     table_assoc = Param.Unsigned(16, "EIP source table associativity")
     history_entries = Param.Unsigned(16, "History buffer entries")
-    max_basic_block_size = Param.Unsigned(64, "Maximum basic block size")
-    destinations_per_entry = Param.Unsigned(6, "Maximum destinations per source")
+    max_basic_block_size = Param.Unsigned(
+        63, "Maximum cache lines following an EIP basic-block head"
+    )
+    destinations_per_entry = Param.Unsigned(
+        4, "Physical-address compressed destination formats per source"
+    )
     confidence_bits = Param.Unsigned(2, "Destination confidence counter bits")
-    merge_distance = Param.Unsigned(6, "Basic block merge distance in lines")
+    merge_distance = Param.Unsigned(
+        6, "Recent History entries examined for basic-block merging"
+    )
     prefetch_queue_size = Param.Unsigned(32, "Maximum EIP prefetch queue size")
     latency = Param.Cycles(1, "Latency for generated prefetches")
     cache_snoop = Param.Bool(True, "Avoid cache and miss-queue duplicates")

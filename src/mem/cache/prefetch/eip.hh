@@ -7,6 +7,7 @@
 #define __MEM_CACHE_PREFETCH_EIP_HH__
 
 #include <deque>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -23,12 +24,11 @@ namespace prefetch
 {
 
 /**
- * Cost-effective entangling instruction prefetcher.
+ * ISCA'21 Entangling Instruction Prefetcher.
  *
- * The implementation deliberately keeps the functional data structures
- * explicit (rather than modelling the bit-packed paper layout).  This makes
- * the prefetcher useful for experiments while exposing an estimate of the
- * corresponding logical storage in the statistics output.
+ * The cache timing metadata mirrors the paper's PQ/MSHR/L1I extensions.
+ * Keeping it locally avoids changing the generic gem5 MSHR implementation
+ * while preserving the paper's fill-time, latency-aware training semantics.
  */
 class EntanglingPrefetcher : public Base
 {
@@ -47,37 +47,48 @@ class EntanglingPrefetcher : public Base
     Tick nextPrefetchReadyTime() const override;
 
   private:
+    static constexpr int InvalidHistory = -1;
+    static constexpr unsigned PhysicalDestinationFormats = 4;
+
     struct HistoryEntry {
+        bool valid = false;
         Addr head = 0;
         unsigned size = 0;
         Tick firstTick = 0;
     };
 
     struct Destination {
-        Addr head = 0;
-        unsigned size = 0;
+        Addr encoded = 0;
         unsigned confidence = 0;
-        Tick lastUpdate = 0;
     };
 
     struct TableEntry {
         bool valid = false;
         Addr source = 0;
-        unsigned maxSize = 0;
+        Addr tag = 0;
+        unsigned size = 0;
+        unsigned format = 1;
         std::vector<Destination> destinations;
     };
 
-    struct PendingPrefetch {
-        Addr source = 0;
-        Addr destination = 0;
+    struct SourceRef {
+        unsigned set = 0;
+        unsigned way = 0;
+        bool valid = false;
+    };
+
+    struct TimingEntry {
         Tick issueTick = 0;
-        bool filled = false;
+        int historyPos = InvalidHistory;
+        SourceRef source;
+        bool accessed = false;
     };
 
     struct QueuedPacket {
         PacketPtr pkt = nullptr;
+        Addr address = 0;
         Tick readyTick = MaxTick;
-        PendingPrefetch metadata;
+        SourceRef source;
     };
 
     struct Stats : public statistics::Group {
@@ -85,10 +96,13 @@ class EntanglingPrefetcher : public Base
         statistics::Scalar basicBlocksObserved;
         statistics::Scalar historyInsertions;
         statistics::Scalar historyMerges;
+        statistics::Scalar historyLookupHits;
+        statistics::Scalar historyLookupMisses;
         statistics::Scalar tableLookups;
         statistics::Scalar tableHits;
         statistics::Scalar tableInsertions;
         statistics::Scalar tableReplacements;
+        statistics::Scalar tableRelocations;
         statistics::Scalar entanglementInsertions;
         statistics::Scalar entanglementEvictions;
         statistics::Scalar prefetchCandidates;
@@ -99,7 +113,8 @@ class EntanglingPrefetcher : public Base
         statistics::Scalar confidenceIncrements;
         statistics::Scalar confidenceDecrements;
         statistics::Scalar demandInstructionMisses;
-        statistics::Scalar coveredInstructionMisses;
+        statistics::Scalar fillTrainingEvents;
+        statistics::Scalar trainingWithoutHistory;
         statistics::Scalar logicalStorageBytes;
     } stats;
 
@@ -117,28 +132,55 @@ class EntanglingPrefetcher : public Base
 
     std::vector<TableEntry> table;
     std::vector<unsigned> setVictim;
-    std::deque<HistoryEntry> history;
+    std::vector<HistoryEntry> history;
+    unsigned historyHead = 0;
+    unsigned historyCount = 0;
     std::deque<QueuedPacket> queue;
-    std::unordered_map<Addr, PendingPrefetch> pending;
+    std::unordered_map<Addr, TimingEntry> timingMSHR;
+    std::unordered_map<Addr, TimingEntry> timingCache;
     std::vector<ProbeListenerPtr<>> cacheListeners;
 
     Addr currentHead = 0;
     Addr currentLastLine = 0;
     unsigned currentSize = 0;
-    Tick currentFirstTick = 0;
+    unsigned currentMergeOffset = 0;
     bool haveCurrent = false;
 
     unsigned tableSet(Addr source) const;
+    Addr tableTag(Addr source) const;
+    Tick currentCycle() const;
     TableEntry *findEntry(Addr source);
     const TableEntry *findEntry(Addr source) const;
-    void finishCurrentBlock(Tick now);
-    void insertHistory(const HistoryEntry &entry);
-    void train(const HistoryEntry &entry);
-    void issueFor(const PrefetchInfo &pfi, const CacheAccessor &cache);
-    void enqueue(Addr address, Addr source, Addr destination,
+    TableEntry &allocateEntry(Addr source);
+    unsigned destinationFormat(Addr source, Addr destination) const;
+    Addr compressDestination(Addr destination, unsigned format) const;
+    Addr expandDestination(Addr source, Addr encoded, unsigned format) const;
+    void setDestinationFormat(TableEntry &entry, unsigned format);
+    void recomputeDestinationFormat(TableEntry &entry);
+    void updateBasicBlock(Addr head, unsigned size);
+    bool canInsertWithoutEviction(Addr source, Addr destination) const;
+    void addEntanglement(Addr source, Addr destination);
+
+    int findHistory(Addr head) const;
+    int insertHistory(Addr head);
+    void updateHistorySize(Addr head, unsigned size);
+    unsigned findMergeOffset(Addr head) const;
+    int beginBasicBlock(Addr line, bool isMiss);
+    int observeBasicBlock(Addr line, bool isMiss);
+    void finishCurrentBlock();
+    std::optional<Addr> findTimelySource(Addr destination, int historyPos,
+                                         Tick missStart, Tick missLatency,
+                                         unsigned skip);
+    void trainAtFill(Addr destination, const TimingEntry &timing);
+
+    void issueFor(Addr line, const PrefetchInfo &pfi,
+                  const CacheAccessor &cache);
+    void enqueue(Addr address, const SourceRef &source,
                  const PrefetchInfo &pfi, const CacheAccessor &cache);
-    void adjustConfidence(Addr source, Addr destination, bool increment);
-    void removePending(Addr address);
+    void adjustConfidence(const SourceRef &source, Addr destination,
+                          bool increment);
+    void observeDemandMiss(Addr line, int historyPos);
+    void observeDemandHit(Addr line);
 };
 
 } // namespace prefetch
