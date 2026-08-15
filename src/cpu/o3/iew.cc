@@ -139,6 +139,8 @@ IEW::regProbePoints()
             cpu->getProbeManager(), "Dispatch");
     ppMispredict = new ProbePointArg<DynInstPtr>(
             cpu->getProbeManager(), "Mispredict");
+    ppBackendStall = new ProbePointArg<ThreadID>(
+            cpu->getProbeManager(), "BackendStall");
     /**
      * Probe point with dynamic instruction as the argument used to probe when
      * an instruction starts to execute.
@@ -669,6 +671,8 @@ IEW::updateStatus()
     bool any_unblocking = false;
 
     for (ThreadID tid : *activeThreads) {
+        if (instQueue.getCount(tid) == 0)
+            ppBackendStall->notify(tid);
         if (dispatchStatus[tid] == Unblocking) {
             any_unblocking = true;
             break;

@@ -256,6 +256,9 @@ class FTQ
     /** Probe points to attach the FDP prefetcher. */
     ProbePointArg<FetchTargetPtr> *ppFTQInsert;
     ProbePointArg<FetchTargetPtr> *ppFTQRemove;
+    /** Lifecycle probes with an unambiguous retirement/squash outcome. */
+    ProbePointArg<FetchTargetPtr> *ppFTQConsumed;
+    ProbePointArg<FetchTargetPtr> *ppFTQSquash;
 
     /** FTQ List of Fetch targets */
     std::array<std::list<FetchTargetPtr>, MaxThreads> ftq;

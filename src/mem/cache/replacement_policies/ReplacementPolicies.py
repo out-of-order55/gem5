@@ -79,6 +79,19 @@ class LRURP(BaseReplacementPolicy):
     cxx_header = "mem/cache/replacement_policies/lru_rp.hh"
 
 
+class EmissaryLRURP(LRURP):
+    type = "EmissaryLRURP"
+    cxx_class = "gem5::replacement_policy::EmissaryLRU"
+    cxx_header = "mem/cache/replacement_policies/emissary_lru_rp.hh"
+    protected_ways = Param.Unsigned(8, "Maximum protected ways per set")
+    promotion_probability = Param.Percent(
+        100, "Probability of promoting an FEC-marked fill"
+    )
+    enable_fec_prefetch_source = Param.Bool(
+        True, "Use PDIP-marked prefetch fills as the FEC source"
+    )
+
+
 class BIPRP(LRURP):
     type = "BIPRP"
     cxx_class = "gem5::replacement_policy::BIP"

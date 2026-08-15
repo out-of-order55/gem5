@@ -1609,6 +1609,11 @@ BaseCache::handleFill(PacketPtr pkt, CacheBlk *blk, PacketList &writebacks,
     assert(blk->isSecure() == is_secure);
     assert(regenerateBlkAddr(blk) == addr);
 
+    if (pkt->req->isPDIPFEC()) {
+        blk->setFEC();
+        blk->setPBit();
+    }
+
     blk->setCoherenceBits(CacheBlk::ReadableBit);
 
     // sanity check for whole-line writes, which should always be

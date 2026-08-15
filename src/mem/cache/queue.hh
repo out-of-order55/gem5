@@ -45,6 +45,7 @@
 #ifndef __MEM_CACHE_QUEUE_HH__
 #define __MEM_CACHE_QUEUE_HH__
 
+#include <algorithm>
 #include <cassert>
 #include <string>
 #include <type_traits>
@@ -155,6 +156,12 @@ class Queue : public Drainable, public Named
     int numInService() const
     {
         return _numInService;
+    }
+
+    /** Number of entries that can be allocated without using the reserve. */
+    int numFreeEntries() const
+    {
+        return std::max(0, numEntries - numReserve - allocated);
     }
 
     /**

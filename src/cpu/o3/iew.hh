@@ -120,6 +120,8 @@ class IEW
 
     /** Probe points. */
     ProbePointArg<DynInstPtr> *ppMispredict;
+    /** Notifies listeners when a thread's issue queue has drained. */
+    ProbePointArg<ThreadID> *ppBackendStall;
     ProbePointArg<DynInstPtr> *ppDispatch;
     /** To probe when instruction execution begins. */
     ProbePointArg<DynInstPtr> *ppExecute;

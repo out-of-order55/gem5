@@ -113,6 +113,10 @@ FTQ::regProbePoints()
         new ProbePointArg<FetchTargetPtr>(cpu->getProbeManager(), "FTQInsert");
     ppFTQRemove =
         new ProbePointArg<FetchTargetPtr>(cpu->getProbeManager(), "FTQRemove");
+    ppFTQConsumed = new ProbePointArg<FetchTargetPtr>(
+        cpu->getProbeManager(), "FTQConsumed");
+    ppFTQSquash = new ProbePointArg<FetchTargetPtr>(
+        cpu->getProbeManager(), "FTQSquash");
 }
 
 unsigned
@@ -200,6 +204,7 @@ FTQ::squash(ThreadID tid)
 {
     for (auto ft : ftq[tid]) {
         assert(ft->bpuHistory == nullptr);
+        ppFTQSquash->notify(ft);
         ppFTQRemove->notify(ft);
     }
     ftq[tid].clear();
@@ -258,6 +263,7 @@ FTQ::popHead(ThreadID tid)
         ret_val = false;
     }
 
+    ppFTQConsumed->notify(ftq[tid].front());
     ppFTQRemove->notify(ftq[tid].front());
     ftq[tid].pop_front();
     stats.removals++;

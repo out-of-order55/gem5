@@ -110,6 +110,9 @@ class CacheBlk : public TaggedEntry
     Tick whenReady = 0;
 
   protected:
+    /** PDIP front-end criticality and EMISSARY protection metadata. */
+    bool fec = false;
+    bool pBit = false;
     /**
      * Represents that the indicated thread context has a "lock" on
      * the block, in the LL/SC sense.
@@ -182,6 +185,8 @@ class CacheBlk : public TaggedEntry
         if (other.wasPrefetched()) {
             setPrefetched();
         }
+        fec = other.fec;
+        pBit = other.pBit;
         setCoherenceBits(other.coherence);
         setTaskId(other.getTaskId());
         setPartitionId(other.getPartitionId());
@@ -204,6 +209,8 @@ class CacheBlk : public TaggedEntry
         TaggedEntry::invalidate();
 
         clearPrefetched();
+        fec = false;
+        pBit = false;
         clearCoherenceBits(AllBits);
 
         setTaskId(context_switch_task_id::Unknown);
@@ -213,6 +220,13 @@ class CacheBlk : public TaggedEntry
         setSrcRequestorId(Request::invldRequestorId);
         lockList.clear();
     }
+
+    void setFEC() { fec = true; }
+    void clearFEC() { fec = false; }
+    bool isFEC() const { return fec; }
+    void setPBit() { pBit = true; }
+    void clearPBit() { pBit = false; }
+    bool isPBit() const { return pBit; }
 
     /**
      * Sets the corresponding coherence bits.

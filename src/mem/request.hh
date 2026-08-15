@@ -167,6 +167,8 @@ class Request : public Extensible<Request>
         PF_EXCLUSIVE                = 0x02000000,
         /** The request should be marked as LRU. */
         EVICT_NEXT                  = 0x04000000,
+        /** A prefetch issued for a front-end critical execution block. */
+        PDIP_FEC                    = 0x4000000000000000,
         /** The request should be marked with ACQUIRE. */
         ACQUIRE                     = 0x00020000,
         /** The request should be marked with ACQUIRE_PC. */
@@ -1031,6 +1033,7 @@ class Request : public Extensible<Request>
         return (_flags.isSet(PREFETCH | PF_EXCLUSIVE));
     }
     bool isPrefetchEx() const { return _flags.isSet(PF_EXCLUSIVE); }
+    bool isPDIPFEC() const { return _flags.isSet(PDIP_FEC); }
     bool isLLSC() const { return _flags.isSet(LLSC); }
     bool isPriv() const { return _flags.isSet(PRIVILEGED); }
     bool isLockedRMW() const { return _flags.isSet(LOCKED_RMW); }

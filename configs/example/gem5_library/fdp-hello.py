@@ -62,9 +62,12 @@ import argparse
 from m5.objects import (
     TAGE_SC_L_64KB,
     BranchPredictor,
+    EmissaryLRURP,
     FetchDirectedPrefetcher,
     L2XBar,
+    LRURP,
     MultiPrefetcher,
+    PriorityDirectedPrefetcher,
     SimpleBTB,
     TaggedPrefetcher,
 )
@@ -116,6 +119,36 @@ parser.add_argument(
     default="X86",
     help="The ISA to simulate.",
     choices=isa_choices.keys(),
+)
+parser.add_argument(
+    "--pdip",
+    choices=("off", "on"),
+    default="off",
+    help="Enable priority-directed instruction prefetching.",
+)
+parser.add_argument(
+    "--l2-rp",
+    choices=("lru", "emissary"),
+    default="lru",
+    help="L2 replacement policy.",
+)
+parser.add_argument(
+    "--pdip-table-sets",
+    type=int,
+    default=512,
+    help="Number of PDIP predictor sets.",
+)
+parser.add_argument(
+    "--pdip-table-assoc",
+    type=int,
+    default=8,
+    help="PDIP predictor associativity.",
+)
+parser.add_argument(
+    "--emissary-protected-ways",
+    type=int,
+    default=8,
+    help="Maximum protected lines per L2 set.",
 )
 
 parser.add_argument(
@@ -178,6 +211,17 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
                 pf.registerCache(self.l1icaches[i])
                 self.l1icaches[i].prefetcher.prefetchers.append(pf)
 
+            if args.pdip == "on":
+                pf = PriorityDirectedPrefetcher(
+                    # PDIP table targets are physical L1I line addresses.
+                    use_virtual_addresses=False,
+                    cpu=cpu,
+                    table_sets=args.pdip_table_sets,
+                    table_assoc=args.pdip_table_assoc,
+                )
+                pf.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(pf)
+
             self.l1icaches[i].prefetcher.prefetchers.append(
                 TaggedPrefetcher(use_virtual_addresses=True)
             )
@@ -196,6 +240,12 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
             L2Cache(size=self._l2_size)
             for i in range(board.get_processor().get_num_cores())
         ]
+        for l2 in self.l2caches:
+            l2.replacement_policy = (
+                EmissaryLRURP(protected_ways=args.emissary_protected_ways)
+                if args.l2_rp == "emissary"
+                else LRURP()
+            )
         self.mmucaches = [
             MMUCache(size="8KiB")
             for _ in range(board.get_processor().get_num_cores())
@@ -311,7 +361,8 @@ for c in processor.cores:
 
 print(
     f"Running {args.workload} on {args.isa}, "
-    f"FDP {'disabled' if args.disable_fdp else 'enabled'}"
+    f"FDP {'disabled' if args.disable_fdp else 'enabled'}, "
+    f"PDIP {args.pdip}, L2 {args.l2_rp}"
 )
 
 

@@ -1268,6 +1268,9 @@ class BaseCache : public ClockedObject
         return mshrQueue.findMatch(addr, is_secure);
     }
 
+    /** Number of MSHRs available to non-reserved requests. */
+    int numFreeMSHRs() const { return mshrQueue.numFreeEntries(); }
+
     void incMissCount(PacketPtr pkt)
     {
         assert(pkt->req->requestorId() < system->maxRequestors());

@@ -774,6 +774,49 @@ class FetchDirectedPrefetcher(BasePrefetcher):
     )
 
 
+class PriorityDirectedPrefetcher(BasePrefetcher):
+    type = "PriorityDirectedPrefetcher"
+    cxx_class = "gem5::prefetch::PriorityDirectedPrefetcher"
+    cxx_header = "mem/cache/prefetch/pdip.hh"
+    cxx_exports = [PyBindMethod("setCache")]
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._cache = None
+
+    def regProbeListeners(self):
+        if self._cache:
+            self.getCCObject().setCache(self._cache.getCCObject())
+        super().regProbeListeners()
+
+    def registerCache(self, simObj):
+        if not isinstance(simObj, SimObject):
+            raise TypeError("argument must be a SimObject type")
+        self._cache = simObj
+
+    enabled = Param.Bool(True, "Enable PDIP training and issuance")
+    cpu = Param.BaseCPU(Parent.any, "The O3 CPU supplying FTQ probes")
+    table_sets = Param.Unsigned(512, "Number of predictor sets")
+    table_assoc = Param.Unsigned(8, "Ways per predictor set")
+    tag_bits = Param.Unsigned(10, "Stored trigger tag bits")
+    target_address_bits = Param.Unsigned(
+        34, "Physical-address bits stored for each PDIP target"
+    )
+    targets_per_entry = Param.Unsigned(2, "Maximum physical targets")
+    target_mask_bits = Param.Unsigned(4, "Contiguous lines per target")
+    training_probability = Param.Percent(25, "Probability of learning a target")
+    min_free_mshrs = Param.Unsigned(2, "MSHRs reserved for demand fetches")
+    high_cost_cycles = Param.Unsigned(20, "Critical-stall threshold")
+    require_backend_stall = Param.Bool(True, "Require backend stall for FEC")
+    ignore_returns = Param.Bool(True, "Do not learn return-like triggers")
+    latency = Param.Cycles(1, "Latency for generated prefetches")
+    pfq_size = Param.Unsigned(64, "Maximum queued prefetches")
+    tq_size = Param.Unsigned(64, "Maximum outstanding translations")
+    mark_req_as_prefetch = Param.Bool(True, "Mark requests as prefetches")
+    squash_prefetches = Param.Bool(True, "Cancel requests from squashed FTQs")
+    cache_snoop = Param.Bool(True, "Avoid cache and miss-queue duplicates")
+
+
 add_citation(
     FetchDirectedPrefetcher,
     """@inproceedings{10.1145/3613424.3614258,
