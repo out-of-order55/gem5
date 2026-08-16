@@ -313,7 +313,7 @@ format WarnUnimpl {
                 default: Inst::FILD(Mq);
             }
             0x6: decode MODRM_MOD {
-                0x3: fcomip();
+                0x3: Inst::FCOMIP(Rq);
                 default: fbstp();
             }
             0x7: decode MODRM_MOD {

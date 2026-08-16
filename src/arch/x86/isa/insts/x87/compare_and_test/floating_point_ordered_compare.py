@@ -44,4 +44,9 @@ def macroop FCOMI_R
     compfp st(0), sti
 };
 
+def macroop FCOMIP_R
+{
+    compfp st(0), sti, spm=1
+};
+
 """
