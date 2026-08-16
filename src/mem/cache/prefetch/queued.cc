@@ -490,24 +490,24 @@ Queued::addToQueue(std::list<DeferredPacket> &queue,
     /* Verify prefetch buffer space for request */
     if (queue.size() == queueSize) {
         statsQueued.pfRemovedFull++;
-        /* Lowest priority packet */
+        /*
+         * A pending translation owns an asynchronous TLB callback whose
+         * argument points into this list.  Never evict such an entry: doing
+         * so leaves the callback with a dangling DeferredPacket pointer and
+         * can crash in translationComplete().
+         */
+        const bool pendingTranslations = (&queue == &pfqMissingTranslation);
         iterator it = queue.end();
-        panic_if (it == queue.begin(),
-            "Prefetch queue is both full and empty!");
-        --it;
-        /* Look for oldest in that level of priority */
-        panic_if (it == queue.begin(),
-            "Prefetch queue is full with 1 element!");
-        iterator prev = it;
-        bool cont = true;
-        /* While not at the head of the queue */
-        while (cont && prev != queue.begin()) {
-            prev--;
-            /* While at the same level of priority */
-            cont = prev->priority == it->priority;
-            if (cont)
-                /* update pointer */
-                it = prev;
+        for (iterator candidate = queue.begin(); candidate != queue.end();
+             ++candidate) {
+            if (pendingTranslations && candidate->ongoingTranslation)
+                continue;
+            if (it == queue.end() || candidate->priority < it->priority)
+                it = candidate;
+        }
+        if (it == queue.end()) {
+            // All entries are being translated; retain them and drop dpp.
+            return;
         }
         DPRINTF(HWPrefetch, "Prefetch queue full, removing lowest priority "
                             "oldest packet, addr: %#x\n",it->pfInfo.getAddr());
