@@ -89,6 +89,12 @@ FetchDirectedPrefetcher::notifyFTQInsert(const o3::FetchTargetPtr &ft)
             continue;
         }
 
+        observeCandidate(blk_addr, ft->getTid(), ft->ftNum());
+        if (!allowPrefetch(blk_addr, ft->getTid(), ft->ftNum())) {
+            DPRINTF(HWPrefetch, "Derived FDIP policy filters %#x\n", blk_addr);
+            continue;
+        }
+
         stats.pfIdentified++;
 
         if (translationq.size() >= tqSize) {
@@ -210,6 +216,7 @@ FetchDirectedPrefetcher::getPacket()
     if (pfq.size() == 0) {
         return nullptr;
     }
+    const Addr candidate_addr = pfq.front().addr;
     PacketPtr pkt = pfq.front().pkt;
 
     DPRINTF(HWPrefetch, "Issue Prefetch to: pkt:%#x, PC:%#x, PFQ size:%i\n",
@@ -218,6 +225,7 @@ FetchDirectedPrefetcher::getPacket()
     pfq.pop_front();
     stats.pfqPops++;
 
+    notifyPrefetchIssued(candidate_addr, pkt->getAddr());
     prefetchStats.pfIssued++;
     return pkt;
 }

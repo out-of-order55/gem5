@@ -91,6 +91,7 @@ class FetchDirectedPrefetcher : public Base
     /** Array of probe listeners */
     std::vector<ProbeListenerPtr<>> listeners;
 
+  protected:
     /** Pointer to the CPU object that contains the FTQ */
     BaseCPU *cpu;
 
@@ -114,6 +115,24 @@ class FetchDirectedPrefetcher : public Base
 
     /** Probe the cache before a prefetch gets inserted into the PFQ */
     const bool cacheSnoop;
+
+    /**
+     * Hooks for FDIP-derived prefetchers.  The base implementation keeps the
+     * original FDIP behavior.  A derived prefetcher can observe every unique
+     * FTQ line candidate, suppress a request, and learn when a request is
+     * actually accepted by the cache prefetch queue.
+     */
+    virtual void observeCandidate(Addr addr, ThreadID tid, o3::FTSeqNum ftn)
+    {}
+    virtual bool allowPrefetch(Addr addr, ThreadID tid, o3::FTSeqNum ftn)
+    {
+        return true;
+    }
+    virtual void notifyPrefetchIssued(Addr candidate_addr, Addr physical_addr)
+    {}
+    virtual void notifyFTQInsert(const o3::FetchTargetPtr &ft);
+
+  private:
 
     /** The prefetch queue entry objects */
     struct PrefetchRequest : public BaseMMU::Translation
@@ -177,10 +196,6 @@ class FetchDirectedPrefetcher : public Base
     /** The prefetch queue */
     std::list<PrefetchRequest> pfq;
     std::list<PrefetchRequest> translationq;
-
-    /** Notifies the prefetcher that a new fetch target was
-     * inserted into the FTQ. */
-    void notifyFTQInsert(const o3::FetchTargetPtr &ft);
 
     /** Notifies the prefetcher that a fetch target was
      * removed from the FTQ */
