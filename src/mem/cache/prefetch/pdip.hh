@@ -69,6 +69,7 @@ class PriorityDirectedPrefetcher : public Base
         bool finalized = false;
     };
     struct FTQState {
+        o3::FTSeqNum ftn = 0;
         Addr start = 0;
         Addr end = 0;
         Addr trigger = MaxAddr;
@@ -95,7 +96,10 @@ class PriorityDirectedPrefetcher : public Base
     void notifyCommit(const o3::DynInstPtr &inst);
     void notifyBackendStall(ThreadID tid);
     void finalizeFEC(FTQState &state, Addr retiredPC);
+    void retirePendingMiss(Addr pc);
+    void discardPendingMisses(const FTQState &state);
     FTQState *findFTQ(Addr pc, ThreadID tid);
+    FTQState *findFTQByNum(o3::FTSeqNum ftn, ThreadID tid);
     void retireOldFTQs();
     void issueTargets(Addr trigger, ThreadID tid, o3::FTSeqNum ftn);
     void enqueue(Addr address, ThreadID tid, o3::FTSeqNum ftn);
@@ -133,7 +137,16 @@ class PriorityDirectedPrefetcher : public Base
     // FTQ entries leave the queue before every instruction in the block
     // retires. Keep their metadata until commit makes the FEC decision.
     std::deque<FTQState> recentFtqs;
+    std::unordered_map<o3::FTSeqNum, FTQState *> recentFtqIndex;
     static constexpr size_t RecentFTQWindow = 128;
+    // Only instructions on these lines can finalize an FEC.  This keeps the
+    // commit probe from scanning every live and recently consumed FTQ entry.
+    std::unordered_map<Addr, unsigned> pendingMissBlocks;
+    bool lastCommitFTQValid = false;
+    o3::FTSeqNum lastCommitFTN = 0;
+    Addr lastCommitStart = 0;
+    Addr lastCommitEnd = 0;
+    ThreadID lastCommitTid = InvalidThreadID;
     std::array<Addr, o3::MaxThreads> resteerTriggers;
     std::array<unsigned, o3::MaxThreads> resteerWindows;
     std::array<Addr, o3::MaxThreads> lastTakenBranches;
@@ -142,6 +155,7 @@ class PriorityDirectedPrefetcher : public Base
     struct Stats : public statistics::Group {
         Stats(statistics::Group *parent);
         statistics::Scalar ftqInsertions;
+        statistics::Scalar ftqRemovals;
         statistics::Scalar tableLookups;
         statistics::Scalar branchBlockLookups;
         statistics::Scalar nipLookups;

@@ -221,11 +221,19 @@ PriorityDirectedPrefetcher::notifyFTQInsert(const o3::FetchTargetPtr &ft)
         trigger = lastTakenBranches[tid];
     }
     FTQState state;
+    state.ftn = ft->ftNum();
     state.start = start;
     state.end = end;
     state.trigger = trigger;
     state.tid = tid;
     state.resteerPath = resteer_path;
+
+    // Avoid overwriting metadata if a producer reuses an FTQ sequence number.
+    auto stale = ftqs.find(ft->ftNum());
+    if (stale != ftqs.end()) {
+        discardPendingMisses(stale->second);
+        ftqs.erase(stale);
+    }
     ftqs[ft->ftNum()] = std::move(state);
     stats.ftqInsertions++;
     // The PDIP controller receives the BTB-hit branch block. When no BTB
@@ -248,6 +256,8 @@ PriorityDirectedPrefetcher::notifyFTQRemove(const o3::FetchTargetPtr &ft)
         return;
     recentFtqs.push_back(std::move(it->second));
     ftqs.erase(it);
+    recentFtqIndex[ft->ftNum()] = &recentFtqs.back();
+    stats.ftqRemovals++;
     retireOldFTQs();
 }
 
@@ -262,6 +272,7 @@ PriorityDirectedPrefetcher::finalizeFEC(FTQState &state, Addr retired_pc)
             continue;
 
         miss.finalized = true;
+        retirePendingMiss(miss.pc);
         stats.finalizedFECs++;
         stats.retiredMisses++;
         const bool high_cost = curTick() - miss.missTick >= highCost;
@@ -289,9 +300,34 @@ PriorityDirectedPrefetcher::finalizeFEC(FTQState &state, Addr retired_pc)
 }
 
 void
+PriorityDirectedPrefetcher::retirePendingMiss(Addr pc)
+{
+    auto pending = pendingMissBlocks.find(pc);
+    assert(pending != pendingMissBlocks.end());
+    assert(pending->second != 0);
+    if (--pending->second == 0)
+        pendingMissBlocks.erase(pending);
+}
+
+void
+PriorityDirectedPrefetcher::discardPendingMisses(const FTQState &state)
+{
+    for (const auto &miss : state.misses) {
+        if (!miss.finalized)
+            retirePendingMiss(miss.pc);
+    }
+}
+
+void
 PriorityDirectedPrefetcher::notifyFTQSquash(const o3::FetchTargetPtr &ft)
 {
-    ftqs.erase(ft->ftNum());
+    auto state = ftqs.find(ft->ftNum());
+    if (state != ftqs.end()) {
+        discardPendingMisses(state->second);
+        ftqs.erase(state);
+        if (lastCommitFTQValid && lastCommitFTN == ft->ftNum())
+            lastCommitFTQValid = false;
+    }
     if (!squashPrefetches)
         return;
     for (auto it = pfq.begin(); it != pfq.end();) {
@@ -331,8 +367,10 @@ PriorityDirectedPrefetcher::notifyCacheMiss(const CacheAccessProbeArg &arg)
             matched_state->misses.end(), [block](const MissState &miss) {
                 return miss.pc == block;
             });
-        if (known == matched_state->misses.end())
+        if (known == matched_state->misses.end()) {
             matched_state->misses.push_back({block, paddr, curTick()});
+            pendingMissBlocks[block]++;
+        }
         stats.missesMatchedFTQ++;
         return;
     }
@@ -345,8 +383,10 @@ PriorityDirectedPrefetcher::notifyCacheMiss(const CacheAccessProbeArg &arg)
                 state->misses.end(), [block](const MissState &miss) {
                     return miss.pc == block;
                 });
-            if (known == state->misses.end())
+            if (known == state->misses.end()) {
                 state->misses.push_back({block, paddr, curTick()});
+                pendingMissBlocks[block]++;
+            }
             stats.missesMatchedFTQ++;
             stats.missesMatchedRecentFTQ++;
             return;
@@ -371,10 +411,24 @@ PriorityDirectedPrefetcher::findFTQ(Addr pc, ThreadID tid)
     return nullptr;
 }
 
+PriorityDirectedPrefetcher::FTQState *
+PriorityDirectedPrefetcher::findFTQByNum(o3::FTSeqNum ftn, ThreadID tid)
+{
+    auto live = ftqs.find(ftn);
+    if (live != ftqs.end() && live->second.tid == tid)
+        return &live->second;
+    auto recent = recentFtqIndex.find(ftn);
+    if (recent != recentFtqIndex.end() && recent->second->tid == tid)
+        return recent->second;
+    return nullptr;
+}
+
 void
 PriorityDirectedPrefetcher::retireOldFTQs()
 {
     while (recentFtqs.size() > RecentFTQWindow) {
+        recentFtqIndex.erase(recentFtqs.front().ftn);
+        discardPendingMisses(recentFtqs.front());
         recentFtqs.pop_front();
     }
 }
@@ -400,7 +454,23 @@ PriorityDirectedPrefetcher::notifyCommit(const o3::DynInstPtr &inst)
     if (inst->isControl() && !(ignoreReturns && inst->isReturn()) &&
         (inst->isUncondCtrl() || inst->readPredTaken() || inst->mispredicted()))
         lastTakenBranches[tid] = blockAddress(inst->pcState().instAddr());
-    if (auto *state = findFTQ(inst->pcState().instAddr(), tid)) {
+    const Addr committed_block = blockAddress(inst->pcState().instAddr());
+    if (pendingMissBlocks.find(committed_block) == pendingMissBlocks.end())
+        return;
+    FTQState *state = nullptr;
+    if (lastCommitFTQValid && lastCommitTid == tid &&
+        committed_block >= lastCommitStart &&
+        committed_block <= lastCommitEnd) {
+        state = findFTQByNum(lastCommitFTN, tid);
+    }
+    if (!state)
+        state = findFTQ(committed_block, tid);
+    if (state) {
+        lastCommitFTQValid = true;
+        lastCommitFTN = state->ftn;
+        lastCommitStart = state->start;
+        lastCommitEnd = state->end;
+        lastCommitTid = tid;
         finalizeFEC(*state, inst->pcState().instAddr());
     }
 }
@@ -500,6 +570,7 @@ PriorityDirectedPrefetcher::regProbeListeners()
 PriorityDirectedPrefetcher::Stats::Stats(statistics::Group *parent)
     : statistics::Group(parent),
       ADD_STAT(ftqInsertions, statistics::units::Count::get(), "FTQ insertions"),
+      ADD_STAT(ftqRemovals, statistics::units::Count::get(), "FTQ removals"),
       ADD_STAT(tableLookups, statistics::units::Count::get(), "PDIP table lookups"),
       ADD_STAT(branchBlockLookups, statistics::units::Count::get(),
                "PDIP lookups keyed by a BTB branch block"),
