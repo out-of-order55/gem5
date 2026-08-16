@@ -817,6 +817,36 @@ class PriorityDirectedPrefetcher(BasePrefetcher):
     cache_snoop = Param.Bool(True, "Avoid cache and miss-queue duplicates")
 
 
+class UtilityDirectedPrefetcher(FetchDirectedPrefetcher):
+    type = "UtilityDirectedPrefetcher"
+    cxx_class = "gem5::prefetch::UtilityDirectedPrefetcher"
+    cxx_header = "mem/cache/prefetch/udp.hh"
+
+    confidence_threshold = Param.Unsigned(
+        15, "UDP enters its useful-set-only mode when the score exceeds this"
+    )
+    seniority_entries = Param.Unsigned(
+        128, "Bounded UDP Seniority-FTQ entries"
+    )
+    bloom1_bits = Param.Unsigned(16 * 1024, "One-line UDP Bloom filter bits")
+    bloom2_bits = Param.Unsigned(1024, "Two-line UDP Bloom filter bits")
+    bloom4_bits = Param.Unsigned(1024, "Four-line UDP Bloom filter bits")
+    bloom_hashes = Param.Unsigned(6, "UDP Bloom-filter hash functions")
+    bloom1_entries = Param.Unsigned(4000, "One-line Bloom filter clear point")
+    bloom2_entries = Param.Unsigned(1000, "Two-line Bloom filter clear point")
+    bloom4_entries = Param.Unsigned(1000, "Four-line Bloom filter clear point")
+    bloom_clear_unuseful_ratio = Param.Float(
+        0.75, "Clear a full UDP Bloom filter above this unused ratio"
+    )
+    bloom_clear_period = Param.Cycles(
+        10000, "UDP unused-prefetch accounting period"
+    )
+    on_data = Param.Bool(False, "UDP only observes L1I accesses")
+    on_inst = Param.Bool(True, "UDP observes L1I accesses")
+    prefetch_on_access = Param.Bool(True, "Keep L1I cache probe registration")
+    use_virtual_addresses = Param.Bool(True, "UDP useful-set keys FDIP virtual lines")
+
+
 class EntanglingPrefetcher(BasePrefetcher):
     type = "EntanglingPrefetcher"
     cxx_class = "gem5::prefetch::EntanglingPrefetcher"
@@ -842,6 +872,29 @@ class EntanglingPrefetcher(BasePrefetcher):
     use_virtual_addresses = Param.Bool(False, "EIP uses physical addresses")
     on_inst = Param.Bool(True, "Observe instruction accesses")
     prefetch_on_access = Param.Bool(True, "Observe every instruction access")
+
+
+class DistantJoltPrefetcher(BasePrefetcher):
+    type = "DistantJoltPrefetcher"
+    cxx_class = "gem5::prefetch::DistantJoltPrefetcher"
+    cxx_header = "mem/cache/prefetch/d_jolt.hh"
+
+    cpu = Param.BaseCPU(Parent.any, "The O3 CPU supplying fetched branches")
+    short_history_length = Param.Unsigned(4, "D-JOLT short FIFO_RETCNT history")
+    long_history_length = Param.Unsigned(7, "D-JOLT long FIFO_RETCNT history")
+    short_distance = Param.Unsigned(4, "D-JOLT short signature distance")
+    long_distance = Param.Unsigned(15, "D-JOLT long signature distance")
+    short_table_sets = Param.Unsigned(32, "D-JOLT short miss-table sets")
+    long_table_sets = Param.Unsigned(64, "D-JOLT long miss-table sets")
+    extra_table_sets = Param.Unsigned(256, "D-JOLT shared extra-table sets")
+    table_assoc = Param.Unsigned(4, "D-JOLT miss-table associativity")
+    prefetch_queue_size = Param.Unsigned(32, "D-JOLT request queue size")
+    latency = Param.Cycles(1, "D-JOLT prefetch request latency")
+    cache_snoop = Param.Bool(True, "Avoid D-JOLT cache and MSHR duplicates")
+    on_data = Param.Bool(False, "D-JOLT only observes instruction accesses")
+    on_inst = Param.Bool(True, "D-JOLT observes instruction accesses")
+    prefetch_on_access = Param.Bool(True, "D-JOLT observes all L1I accesses")
+    use_virtual_addresses = Param.Bool(False, "D-JOLT miss addresses use PA")
 
 
 add_citation(

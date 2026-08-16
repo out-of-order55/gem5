@@ -38,7 +38,8 @@ SimObject('Prefetcher.py', sim_objects=[
     'IrregularStreamBufferPrefetcher', 'SlimAMPMPrefetcher',
     'BOPPrefetcher', 'SBOOEPrefetcher', 'STeMSPrefetcher', 'PIFPrefetcher',
     'FetchDirectedPrefetcher', 'PriorityDirectedPrefetcher',
-    'EntanglingPrefetcher'
+    'EntanglingPrefetcher', 'UtilityDirectedPrefetcher',
+    'DistantJoltPrefetcher'
     ])
 
 Source('access_map_pattern_matching.cc')
@@ -61,3 +62,5 @@ Source('tagged.cc')
 Source('fdp.cc')
 Source('pdip.cc')
 Source('eip.cc')
+Source('udp.cc')
+Source('d_jolt.cc')
