@@ -281,6 +281,7 @@ class BPredUnit : public SimObject
               inst(inst), type(getBranchType(inst)),
               call(inst->isCall()), uncond(!inst->isCondCtrl()),
               predTaken(false), actuallyTaken(false), condPred(false),
+              confidence(ConditionalPredictor::PredictionConfidence::High),
               btbHit(false), targetProvider(TargetProvider::NoTarget),
               resteered(false), mispredict(false), target(nullptr),
               bpHistory(nullptr),
@@ -332,6 +333,9 @@ class BPredUnit : public SimObject
 
         /** The prediction of the conditional predictor */
         bool condPred;
+
+        /** Confidence reported by the conditional predictor. */
+        ConditionalPredictor::PredictionConfidence confidence;
 
         /** Was BTB hit at prediction time */
         bool btbHit;

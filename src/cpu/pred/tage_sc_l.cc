@@ -457,6 +457,20 @@ TAGE_SC_L::predict(ThreadID tid, Addr pc, bool cond_branch, void* &b)
     return pred_taken;
 }
 
+ConditionalPredictor::PredictionConfidence
+TAGE_SC_L::getConfidence(void *bp_history) const
+{
+    if (!bp_history)
+        return PredictionConfidence::High;
+
+    const auto *bi = static_cast<const TageSCLBranchInfo *>(bp_history);
+    if (bi->scBranchInfo->lowConf)
+        return PredictionConfidence::Low;
+    if (bi->scBranchInfo->medConf)
+        return PredictionConfidence::Medium;
+    return PredictionConfidence::High;
+}
+
 void
 TAGE_SC_L::update(ThreadID tid, Addr pc, bool taken, void *&bp_history,
                   bool squashed, const StaticInstPtr & inst, Addr target)

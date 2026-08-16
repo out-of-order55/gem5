@@ -58,6 +58,13 @@ class ConditionalPredictor : public SimObject
 {
   public:
 
+    enum class PredictionConfidence : uint8_t
+    {
+        Low,
+        Medium,
+        High,
+    };
+
     typedef ConditionalPredictorParams Params;
 
     ConditionalPredictor(const Params &params);
@@ -73,6 +80,12 @@ class ConditionalPredictor : public SimObject
      * @return Whether the branch is taken or not taken.
      */
     virtual bool lookup(ThreadID tid, Addr pc, void * &bp_history) = 0;
+
+    virtual PredictionConfidence
+    getConfidence(void *bp_history) const
+    {
+        return PredictionConfidence::Medium;
+    }
 
     /**
      * Ones done with the prediction this function updates the
