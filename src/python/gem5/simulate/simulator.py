@@ -101,7 +101,7 @@ class Simulator:
         expected_execution_order: Optional[List[ExitEvent]] = None,
         max_ticks: Optional[int] = m5.MaxTick,
         id: Optional[int] = None,
-        outdir: Optional[str | Path] = None,
+        outdir: Optional[Union[str, Path]] = None,
     ) -> None:
         """
         :param board: The board to be simulated.
