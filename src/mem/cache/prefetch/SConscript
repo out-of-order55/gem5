@@ -39,6 +39,7 @@ SimObject('Prefetcher.py', sim_objects=[
     'BOPPrefetcher', 'SBOOEPrefetcher', 'STeMSPrefetcher', 'PIFPrefetcher',
     'FetchDirectedPrefetcher', 'PriorityDirectedPrefetcher',
     'EntanglingPrefetcher', 'UtilityDirectedPrefetcher',
+    'UtilityFetchTargetQueuePrefetcher',
     'DistantJoltPrefetcher'
     ])
 
@@ -63,4 +64,5 @@ Source('fdp.cc')
 Source('pdip.cc')
 Source('eip.cc')
 Source('udp.cc')
+Source('uftq.cc')
 Source('d_jolt.cc')

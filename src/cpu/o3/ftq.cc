@@ -86,6 +86,7 @@ FetchTarget::toString()
 FTQ::FTQ(CPU *_cpu, const BaseO3CPUParams &params)
     : cpu(_cpu),
       numEntries(params.numFTQEntries),
+      effectiveEntries(params.numFTQEntries),
       stats(_cpu, params.numFTQEntries)
 {
     for (ThreadID tid = 0; tid < MaxThreads; tid++) {
@@ -122,7 +123,17 @@ FTQ::regProbePoints()
 unsigned
 FTQ::numFreeEntries(ThreadID tid)
 {
-    return numEntries - ftq[tid].size();
+    return ftq[tid].size() >= effectiveEntries ? 0 :
+        effectiveEntries - ftq[tid].size();
+}
+
+void
+FTQ::setEffectiveEntries(unsigned entries)
+{
+    fatal_if(entries == 0 || entries > numEntries,
+             "FTQ effective capacity %u must be in [1, %u]", entries,
+             numEntries);
+    effectiveEntries = entries;
 }
 
 unsigned
@@ -134,7 +145,7 @@ FTQ::size(ThreadID tid)
 bool
 FTQ::isFull(ThreadID tid)
 {
-    return ftq[tid].size() >= numEntries;
+    return ftq[tid].size() >= effectiveEntries;
 }
 
 bool
@@ -189,7 +200,7 @@ FTQ::forAllBackward(ThreadID tid, std::function<void(FetchTargetPtr &)> f)
 void
 FTQ::insert(ThreadID tid, FetchTargetPtr fetchTarget)
 {
-    assert(ftq[tid].size() < numEntries);
+    assert(ftq[tid].size() < effectiveEntries);
     ftq[tid].push_back(fetchTarget);
     ppFTQInsert->notify(fetchTarget);
     stats.inserts++;

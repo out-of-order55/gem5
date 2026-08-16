@@ -250,8 +250,15 @@ class FTQ
     /** Pointer to the CPU. */
     CPU *cpu;
 
-    /** Number of fetch targets in the FTQ. (per thread) */
+    /** Physical FTQ capacity configured for each thread. */
     const unsigned numEntries;
+
+    /**
+     * Runtime FTQ capacity used to throttle the decoupled frontend. It may
+     * be reduced below the physical capacity by UFTQ, but never enlarged
+     * beyond it.
+     */
+    unsigned effectiveEntries;
 
     /** Probe points to attach the FDP prefetcher. */
     ProbePointArg<FetchTargetPtr> *ppFTQInsert;
@@ -272,6 +279,15 @@ class FTQ
 
     /** Returns the number of free entries in a specific FTQ paritition. */
     unsigned numFreeEntries(ThreadID tid);
+
+    /** Change the runtime capacity without discarding queued targets. */
+    void setEffectiveEntries(unsigned entries);
+
+    /** Return the current runtime capacity. */
+    unsigned effectiveCapacity() const { return effectiveEntries; }
+
+    /** Return the configured physical FTQ capacity. */
+    unsigned physicalCapacity() const { return numEntries; }
 
     /** Returns the size of the ftq for a specific partition*/
     unsigned size(ThreadID tid);

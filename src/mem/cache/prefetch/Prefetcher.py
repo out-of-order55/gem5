@@ -847,6 +847,34 @@ class UtilityDirectedPrefetcher(FetchDirectedPrefetcher):
     use_virtual_addresses = Param.Bool(True, "UDP useful-set keys FDIP virtual lines")
 
 
+class UtilityFetchTargetQueuePrefetcher(FetchDirectedPrefetcher):
+    type = "UtilityFetchTargetQueuePrefetcher"
+    cxx_class = "gem5::prefetch::UtilityFetchTargetQueuePrefetcher"
+    cxx_header = "mem/cache/prefetch/uftq.hh"
+
+    policy = Param.String(
+        "aur_atr", "UFTQ policy: aur, atr, or aur_atr (paper default)"
+    )
+    initial_depth = Param.Unsigned(32, "Initial effective FTQ depth")
+    min_depth = Param.Unsigned(1, "Minimum effective FTQ depth")
+    max_depth = Param.Unsigned(
+        64, "Maximum effective FTQ depth, bounded by CPU numFTQEntries"
+    )
+    depth_step = Param.Unsigned(1, "Depth adjustment per feedback window")
+    measurement_period = Param.Unsigned(
+        1000, "Prefetches per UFTQ AUR/ATR feedback window"
+    )
+    aur_target = Param.Float(
+        0.65, "Target useful/(useful + unused) prefetch ratio"
+    )
+    atr_target = Param.Float(
+        0.75, "Target timely/(timely + late) prefetch ratio"
+    )
+    on_data = Param.Bool(False, "UFTQ observes only L1I accesses")
+    on_inst = Param.Bool(True, "UFTQ observes L1I accesses")
+    prefetch_on_access = Param.Bool(True, "UFTQ requires L1I hit feedback")
+
+
 class EntanglingPrefetcher(BasePrefetcher):
     type = "EntanglingPrefetcher"
     cxx_class = "gem5::prefetch::EntanglingPrefetcher"

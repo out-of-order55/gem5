@@ -176,6 +176,25 @@ class CPU : public BaseCPU
     /** Constructs a CPU with the given parameters. */
     CPU(const BaseO3CPUParams &params);
 
+    /** Runtime FTQ-capacity interface used by UFTQ. */
+    void
+    setFTQEffectiveEntries(unsigned entries)
+    {
+        ftq.setEffectiveEntries(entries);
+    }
+
+    unsigned
+    ftqEffectiveCapacity() const
+    {
+        return ftq.effectiveCapacity();
+    }
+
+    unsigned
+    ftqPhysicalCapacity() const
+    {
+        return ftq.physicalCapacity();
+    }
+
     ProbePointArg<PacketPtr> *ppInstAccessComplete;
     ProbePointArg<std::pair<DynInstPtr, PacketPtr> > *ppDataAccessComplete;
 
