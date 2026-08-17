@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "params/UtilityDirectedFetchTargetQueuePrefetcher.hh"
 #include "params/UtilityFetchTargetQueuePrefetcher.hh"
 
 namespace gem5
@@ -235,6 +236,224 @@ UtilityFetchTargetQueuePrefetcher::Stats::Stats(statistics::Group *parent)
              "UFTQ timely L1I prefetches"),
     ADD_STAT(untimelyPrefetches, statistics::units::Count::get(),
              "UFTQ late L1I prefetches")
+{
+}
+
+UtilityDirectedFetchTargetQueuePrefetcher::Policy
+UtilityDirectedFetchTargetQueuePrefetcher::parsePolicy(
+    const std::string &name)
+{
+    if (name == "aur")
+        return Policy::Aur;
+    if (name == "atr")
+        return Policy::Atr;
+    if (name == "aur_atr")
+        return Policy::AurAtr;
+    fatal("UDP+UFTQ policy must be one of: aur, atr, aur_atr");
+}
+
+UtilityDirectedFetchTargetQueuePrefetcher::
+UtilityDirectedFetchTargetQueuePrefetcher(const Params &p)
+  : UtilityDirectedPrefetcher(p), uftqStats(this), policy(parsePolicy(p.policy)),
+    initialDepth(p.initial_depth), minDepth(p.min_depth),
+    maxDepth(p.max_depth), depthStep(p.depth_step),
+    measurementPeriod(p.measurement_period), aurTarget(p.aur_target),
+    atrTarget(p.atr_target), o3Cpu(dynamic_cast<o3::CPU *>(cpu))
+{
+    fatal_if(!o3Cpu, "UDP+UFTQ requires an O3 CPU with a decoupled frontend");
+    fatal_if(minDepth == 0 || minDepth > initialDepth ||
+                 initialDepth > maxDepth,
+             "UDP+UFTQ depths must satisfy 1 <= min_depth <= initial_depth "
+             "<= max_depth");
+    fatal_if(maxDepth > o3Cpu->ftqPhysicalCapacity(),
+             "UDP+UFTQ max_depth %u exceeds the FTQ physical capacity %u",
+             maxDepth, o3Cpu->ftqPhysicalCapacity());
+    fatal_if(depthStep == 0 || measurementPeriod == 0,
+             "UDP+UFTQ depth_step and measurement_period must be non-zero");
+    fatal_if(aurTarget < 0.0 || aurTarget > 1.0 ||
+                 atrTarget < 0.0 || atrTarget > 1.0,
+             "UDP+UFTQ AUR and ATR targets must be in [0, 1]");
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::regProbeListeners()
+{
+    UtilityDirectedPrefetcher::regProbeListeners();
+    setDepth(initialDepth);
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::notify(
+    const CacheAccessProbeArg &acc, const PrefetchInfo &pfi)
+{
+    if (!acc.pkt->isDemand() || !acc.pkt->req->isInstFetch())
+        return;
+
+    const Addr line = blockAddress(pfi.getPaddr());
+    const bool prefetched = acc.cache.hasBeenPrefetched(
+        pfi.getPaddr(), pfi.isSecure(), requestorId);
+    if (prefetched) {
+        ++usefulInWindow;
+        ++timelyInWindow;
+        ++uftqStats.usefulPrefetches;
+        ++uftqStats.timelyPrefetches;
+        issuedLines.erase(line);
+    } else if (pfi.isCacheMiss() &&
+               acc.cache.inMissQueue(pfi.getPaddr(), pfi.isSecure()) &&
+               issuedLines.erase(line)) {
+        ++usefulInWindow;
+        ++untimelyInWindow;
+        ++uftqStats.usefulPrefetches;
+        ++uftqStats.untimelyPrefetches;
+    }
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::notifyFill(
+    const CacheAccessProbeArg &acc)
+{
+    issuedLines.erase(blockAddress(acc.pkt->getAddr()));
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::prefetchUnused()
+{
+    UtilityDirectedPrefetcher::prefetchUnused();
+    ++unusefulInWindow;
+    ++uftqStats.uftqUnusefulPrefetches;
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::notifyPrefetchIssued(
+    Addr candidate_addr, Addr physical_addr)
+{
+    UtilityDirectedPrefetcher::notifyPrefetchIssued(candidate_addr,
+                                                     physical_addr);
+    issuedLines.insert(blockAddress(physical_addr));
+    ++issuedInWindow;
+    if (issuedInWindow == measurementPeriod)
+        evaluateWindow();
+}
+
+unsigned
+UtilityDirectedFetchTargetQueuePrefetcher::currentDepth() const
+{
+    return o3Cpu->ftqEffectiveCapacity();
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::setDepth(unsigned depth)
+{
+    depth = std::clamp(depth, minDepth, maxDepth);
+    const unsigned old_depth = currentDepth();
+    if (depth == old_depth)
+        return;
+    o3Cpu->setFTQEffectiveEntries(depth);
+    if (depth > old_depth)
+        ++uftqStats.depthIncreases;
+    else
+        ++uftqStats.depthDecreases;
+}
+
+bool
+UtilityDirectedFetchTargetQueuePrefetcher::seekRatio(
+    double ratio, double target, unsigned &depth)
+{
+    const int direction = ratio > target ? 1 : ratio < target ? -1 : 0;
+    const unsigned old_depth = currentDepth();
+    if (direction == 0 ||
+        (previousDirection && direction != previousDirection) ||
+        (direction > 0 && old_depth == maxDepth) ||
+        (direction < 0 && old_depth == minDepth)) {
+        depth = old_depth;
+        previousDirection = 0;
+        return true;
+    }
+    previousDirection = direction;
+    const unsigned next_depth = direction > 0 ?
+        std::min(maxDepth, old_depth + depthStep) :
+        old_depth > depthStep ? std::max(minDepth, old_depth - depthStep) :
+                                  minDepth;
+    setDepth(next_depth);
+    return false;
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::evaluateWindow()
+{
+    ++uftqStats.windows;
+    const uint64_t utility_samples = usefulInWindow + unusefulInWindow;
+    const uint64_t timeliness_samples = timelyInWindow + untimelyInWindow;
+    if (!utility_samples && !timeliness_samples) {
+        resetWindow();
+        return;
+    }
+    const double utility = utility_samples ?
+        double(usefulInWindow) / utility_samples : aurTarget;
+    const double timeliness = timeliness_samples ?
+        double(timelyInWindow) / timeliness_samples : atrTarget;
+
+    switch (policy) {
+      case Policy::Aur:
+        seekRatio(utility, aurTarget, qdAur);
+        break;
+      case Policy::Atr:
+        seekRatio(timeliness, atrTarget, qdAtr);
+        break;
+      case Policy::AurAtr:
+        if (searchStage == SearchStage::Aur) {
+            if (seekRatio(utility, aurTarget, qdAur)) {
+                ++uftqStats.aurConvergences;
+                searchStage = SearchStage::Atr;
+            }
+        } else if (seekRatio(timeliness, atrTarget, qdAtr)) {
+            ++uftqStats.atrConvergences;
+            const double qd = -0.34 * qdAur + 0.64 * qdAtr +
+                0.008 * qdAur * qdAur + 0.01 * qdAtr * qdAtr -
+                0.008 * qdAur * qdAtr;
+            const unsigned regressed_depth = qd > 0.0 ?
+                static_cast<unsigned>(std::lround(qd)) : 0;
+            setDepth(regressed_depth);
+            ++uftqStats.regressionUpdates;
+            searchStage = SearchStage::Aur;
+        }
+    }
+    resetWindow();
+}
+
+void
+UtilityDirectedFetchTargetQueuePrefetcher::resetWindow()
+{
+    issuedInWindow = 0;
+    usefulInWindow = 0;
+    unusefulInWindow = 0;
+    timelyInWindow = 0;
+    untimelyInWindow = 0;
+}
+
+UtilityDirectedFetchTargetQueuePrefetcher::Stats::Stats(
+    statistics::Group *parent)
+  : statistics::Group(parent),
+    ADD_STAT(windows, statistics::units::Count::get(),
+             "UDP+UFTQ completed feedback windows"),
+    ADD_STAT(depthIncreases, statistics::units::Count::get(),
+             "UDP+UFTQ effective FTQ depth increases"),
+    ADD_STAT(depthDecreases, statistics::units::Count::get(),
+             "UDP+UFTQ effective FTQ depth decreases"),
+    ADD_STAT(aurConvergences, statistics::units::Count::get(),
+             "UDP+UFTQ AUR search convergences"),
+    ADD_STAT(atrConvergences, statistics::units::Count::get(),
+             "UDP+UFTQ ATR search convergences"),
+    ADD_STAT(regressionUpdates, statistics::units::Count::get(),
+             "UDP+UFTQ AUR+ATR regression depth updates"),
+    ADD_STAT(usefulPrefetches, statistics::units::Count::get(),
+             "UDP+UFTQ useful L1I prefetches"),
+    ADD_STAT(uftqUnusefulPrefetches, statistics::units::Count::get(),
+             "UDP+UFTQ unused L1I prefetches"),
+    ADD_STAT(timelyPrefetches, statistics::units::Count::get(),
+             "UDP+UFTQ timely L1I prefetches"),
+    ADD_STAT(untimelyPrefetches, statistics::units::Count::get(),
+             "UDP+UFTQ late L1I prefetches")
 {
 }
 
