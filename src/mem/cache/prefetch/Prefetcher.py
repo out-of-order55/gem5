@@ -937,8 +937,12 @@ class DistantJoltPrefetcher(BasePrefetcher):
     long_history_length = Param.Unsigned(7, "D-JOLT long FIFO_RETCNT history")
     short_distance = Param.Unsigned(4, "D-JOLT short signature distance")
     long_distance = Param.Unsigned(15, "D-JOLT long signature distance")
-    short_table_sets = Param.Unsigned(32, "D-JOLT short miss-table sets")
-    long_table_sets = Param.Unsigned(64, "D-JOLT long miss-table sets")
+    short_table_sets = Param.Unsigned(
+        1024, "D-JOLT Table I short miss-table sets"
+    )
+    long_table_sets = Param.Unsigned(
+        2048, "D-JOLT Table I long miss-table sets"
+    )
     extra_table_sets = Param.Unsigned(256, "D-JOLT shared extra-table sets")
     table_assoc = Param.Unsigned(4, "D-JOLT miss-table associativity")
     prefetch_queue_size = Param.Unsigned(32, "D-JOLT request queue size")
@@ -948,6 +952,20 @@ class DistantJoltPrefetcher(BasePrefetcher):
     on_inst = Param.Bool(True, "D-JOLT observes instruction accesses")
     prefetch_on_access = Param.Bool(True, "D-JOLT observes all L1I accesses")
     use_virtual_addresses = Param.Bool(False, "D-JOLT miss addresses use PA")
+
+
+add_citation(
+    DistantJoltPrefetcher,
+    """@inproceedings{nakamura2022djolt,
+  author    = {Tomoki Nakamura and Toru Koizumi and Yuya Degawa and
+               Hidetsugu Irie and Shuichi Sakai and Ryota Shioya},
+  title     = {{D-JOLT}: Distant Jolt Prefetcher},
+  booktitle = {IEEE International Symposium on Performance Analysis of Systems
+               and Software},
+  year      = {2022}
+}
+""",
+)
 
 
 add_citation(

@@ -2,8 +2,10 @@
  * Copyright (c) 2026
  * All rights reserved.
  *
- * D-JOLT follows the public IPC-1 implementation in Scarab:
- * src/prefetcher/D_JOLT.cc (Nakamura et al.).
+ * The default parameters and FIFO_RETCNT state machine follow
+ * Nakamura et al., "D-JOLT: Distant Jolt Prefetcher".  The public Scarab
+ * implementation is used only to resolve the fallback stream details that
+ * are not expanded in the paper.
  */
 
 #include "mem/cache/prefetch/d_jolt.hh"
@@ -298,9 +300,9 @@ DistantJoltPrefetcher::DistantJoltPrefetcher(const Params &p)
     fatal_if(p.short_history_length != 4 || p.long_history_length != 7 ||
              p.short_distance != 4 || p.long_distance != 15,
              "D-JOLT parameters must use the published (4,4) and (7,15) pairs");
-    fatal_if(p.table_assoc != 4 || p.short_table_sets != 32 ||
-             p.long_table_sets != 64 || p.extra_table_sets != 256,
-             "D-JOLT uses the public 8 KiB Scarab table configuration");
+    fatal_if(p.table_assoc != 4 || p.short_table_sets != 1024 ||
+             p.long_table_sets != 2048 || p.extra_table_sets != 256,
+             "D-JOLT uses the published Table I miss-table configuration");
 }
 
 DistantJoltPrefetcher::~DistantJoltPrefetcher()
@@ -342,12 +344,10 @@ DistantJoltPrefetcher::regProbeListeners()
 void
 DistantJoltPrefetcher::onFetch(const o3::DynInstPtr &inst)
 {
-    // Scarab's public D-JOLT implementation updates FIFO_RETCNT for
-    // CF_CBR, CF_IBR, CF_REP, and CF_RET only.  These map to gem5's
-    // conditional/indirect controls and returns; direct calls and jumps do
-    // not update the signature.
-    if (!inst || !(inst->isCondCtrl() || inst->isIndirectCtrl() ||
-                   inst->isReturn()))
+    // FIFO_RETCNT advances only on function calls and returns. A call adds
+    // its PC to the FIFO and clears the return count; a return retains the
+    // FIFO and increments that count, as specified by the D-JOLT paper.
+    if (!inst || !(inst->isCall() || inst->isReturn()))
         return;
     stats.fetchControlInstructions++;
     const uint32_t short_sig = inst->isReturn()
@@ -473,7 +473,7 @@ DistantJoltPrefetcher::nextPrefetchReadyTime() const
 DistantJoltPrefetcher::Stats::Stats(statistics::Group *parent)
   : statistics::Group(parent),
     ADD_STAT(fetchControlInstructions, statistics::units::Count::get(),
-             "Fetched control instructions that updated D-JOLT signatures"),
+             "Fetched calls and returns that updated D-JOLT signatures"),
     ADD_STAT(cacheMisses, statistics::units::Count::get(),
              "Demand L1I misses learned by D-JOLT"),
     ADD_STAT(upperBitTableFull, statistics::units::Count::get(),

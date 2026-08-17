@@ -27,7 +27,7 @@ struct DistantJoltPrefetcherParams;
 namespace prefetch
 {
 
-/** IPC-1 D-JOLT instruction prefetcher, used as an FDIP companion. */
+/** IPC-1 D-JOLT instruction prefetcher. */
 class DistantJoltPrefetcher : public Base
 {
   public:
