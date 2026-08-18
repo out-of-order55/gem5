@@ -404,6 +404,13 @@ class Base : public ClockedObject
 
     virtual Tick nextPrefetchReadyTime() const = 0;
 
+    /**
+     * Notify the originating prefetcher that the cache discarded one of its
+     * packets before allocating an MSHR.  Prefetchers with request-lifetime
+     * metadata can use this to retire that metadata.
+     */
+    virtual void notifyPrefetchDropped(const PacketPtr &pkt) {}
+
     virtual void
     prefetchUnused()
     {

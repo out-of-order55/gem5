@@ -106,5 +106,12 @@ Multi::incrDemandMhsrMisses()
     }
 }
 
+void
+Multi::notifyPrefetchDropped(const PacketPtr &pkt)
+{
+    for (auto pf : prefetchers)
+        pf->notifyPrefetchDropped(pkt);
+}
+
 } // namespace prefetch
 } // namespace gem5

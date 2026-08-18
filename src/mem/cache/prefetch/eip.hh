@@ -43,6 +43,7 @@ class EntanglingPrefetcher : public Base
                 const PrefetchInfo &pfi) override;
     void notifyFill(const CacheAccessProbeArg &arg) override;
     void notifyEvict(const CacheDataUpdateProbeArg &info) override;
+    void notifyPrefetchDropped(const PacketPtr &pkt) override;
     PacketPtr getPacket() override;
     Tick nextPrefetchReadyTime() const override;
 
@@ -115,6 +116,11 @@ class EntanglingPrefetcher : public Base
         statistics::Scalar demandInstructionMisses;
         statistics::Scalar fillTrainingEvents;
         statistics::Scalar trainingWithoutHistory;
+        statistics::Scalar prefetchDrops;
+        statistics::Scalar prefetchDropMetadataRetirements;
+        statistics::Scalar queueHighWatermark;
+        statistics::Scalar timingMshrHighWatermark;
+        statistics::Scalar timingCacheHighWatermark;
         statistics::Scalar logicalStorageBytes;
     } stats;
 

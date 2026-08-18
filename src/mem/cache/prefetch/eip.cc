@@ -149,6 +149,16 @@ EntanglingPrefetcher::Stats::Stats(statistics::Group *parent)
              "Miss fills that added an entanglement"),
     ADD_STAT(trainingWithoutHistory, statistics::units::Count::get(),
              "Miss fills without a valid history pointer"),
+    ADD_STAT(prefetchDrops, statistics::units::Count::get(),
+             "EIP packets discarded by the cache before MSHR allocation"),
+    ADD_STAT(prefetchDropMetadataRetirements, statistics::units::Count::get(),
+             "Discarded EIP packets whose timing metadata was retired"),
+    ADD_STAT(queueHighWatermark, statistics::units::Count::get(),
+             "Maximum EIP prefetch queue occupancy"),
+    ADD_STAT(timingMshrHighWatermark, statistics::units::Count::get(),
+             "Maximum EIP timing-MSHR metadata entries"),
+    ADD_STAT(timingCacheHighWatermark, statistics::units::Count::get(),
+             "Maximum EIP timing-cache metadata entries"),
     ADD_STAT(logicalStorageBytes, statistics::units::Byte::get(),
              "Paper-style physical-address EIP storage estimate")
 {
@@ -593,6 +603,8 @@ EntanglingPrefetcher::enqueue(Addr address, const SourceRef &source,
     // PQ timing metadata becomes MSHR metadata only after the prefetch is
     // issued, matching Figure 4 of the paper.
     queue.push_back({pkt, line, curTick() + clockPeriod() * latency, source});
+    if (stats.queueHighWatermark.value() < queue.size())
+        stats.queueHighWatermark = queue.size();
 }
 
 void
@@ -682,6 +694,8 @@ EntanglingPrefetcher::observeDemandMiss(Addr line, int historyPos)
     if (existing == timingMSHR.end()) {
         timingMSHR.emplace(line,
             TimingEntry{currentCycle(), historyPos, SourceRef{}, true});
+        if (stats.timingMshrHighWatermark.value() < timingMSHR.size())
+            stats.timingMshrHighWatermark = timingMSHR.size();
         return;
     }
 
@@ -694,6 +708,18 @@ EntanglingPrefetcher::observeDemandMiss(Addr line, int historyPos)
     }
     timing.accessed = true;
     timing.historyPos = historyPos;
+}
+
+void
+EntanglingPrefetcher::notifyPrefetchDropped(const PacketPtr &pkt)
+{
+    if (pkt->req->requestorId() != requestorId)
+        return;
+
+    stats.prefetchDrops++;
+    const Addr line = blockAddress(pkt->getAddr());
+    if (timingMSHR.erase(line))
+        stats.prefetchDropMetadataRetirements++;
 }
 
 void
@@ -748,6 +774,8 @@ EntanglingPrefetcher::notifyFill(const CacheAccessProbeArg &arg)
     // table for timely/wrong confidence feedback.
     if (timing.source.valid)
         timingCache[line] = timing;
+    if (stats.timingCacheHighWatermark.value() < timingCache.size())
+        stats.timingCacheHighWatermark = timingCache.size();
 }
 
 void
@@ -780,6 +808,8 @@ EntanglingPrefetcher::getPacket()
     if (!timingMSHR.count(queued.address)) {
         timingMSHR.emplace(queued.address,
             TimingEntry{currentCycle(), InvalidHistory, queued.source, false});
+        if (stats.timingMshrHighWatermark.value() < timingMSHR.size())
+            stats.timingMshrHighWatermark = timingMSHR.size();
     }
     stats.prefetchIssued++;
     prefetchStats.pfIssued++;

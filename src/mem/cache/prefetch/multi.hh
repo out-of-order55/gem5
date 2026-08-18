@@ -62,6 +62,7 @@ class Multi : public Base
     Tick nextPrefetchReadyTime() const override;
     void prefetchUnused() override;
     void incrDemandMhsrMisses() override;
+    void notifyPrefetchDropped(const PacketPtr &pkt) override;
 
     /** @{ */
     /**

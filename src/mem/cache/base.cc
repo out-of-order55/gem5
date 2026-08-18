@@ -961,18 +961,21 @@ BaseCache::getNextQueueEntry()
                 DPRINTF(HWPrefetch, "Prefetch %#x has hit in cache, "
                         "dropped.\n", pf_addr);
                 prefetcher->pfHitInCache();
+                prefetcher->notifyPrefetchDropped(pkt);
                 // free the request and packet
                 delete pkt;
             } else if (mshrQueue.findMatch(pf_addr, pkt->isSecure())) {
                 DPRINTF(HWPrefetch, "Prefetch %#x has hit in a MSHR, "
                         "dropped.\n", pf_addr);
                 prefetcher->pfHitInMSHR();
+                prefetcher->notifyPrefetchDropped(pkt);
                 // free the request and packet
                 delete pkt;
             } else if (writeBuffer.findMatch(pf_addr, pkt->isSecure())) {
                 DPRINTF(HWPrefetch, "Prefetch %#x has hit in the "
                         "Write Buffer, dropped.\n", pf_addr);
                 prefetcher->pfHitInWB();
+                prefetcher->notifyPrefetchDropped(pkt);
                 // free the request and packet
                 delete pkt;
             } else {
