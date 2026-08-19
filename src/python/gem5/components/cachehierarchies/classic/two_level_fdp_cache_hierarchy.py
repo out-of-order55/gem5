@@ -113,6 +113,11 @@ class TwoLevelFDPCacheHierarchy(PrivateL1SharedL2CacheHierarchy):
                 )
                 self.l1icaches[i].prefetcher.prefetchers.append(pf)
             elif self._pdip:
+                fdip = FetchDirectedPrefetcher(
+                    use_virtual_addresses=True, cpu=cpu
+                )
+                fdip.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(fdip)
                 pf = PriorityDirectedPrefetcher(
                     use_virtual_addresses=False, cpu=cpu
                 )

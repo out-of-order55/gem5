@@ -575,6 +575,14 @@ Decode::tick()
         status_change =  checkSignalsAndUpdate(tid) || status_change;
 
         decode(status_change, tid);
+
+        // A decode cycle with no input while fetch waits for a demand I-cache
+        // response is the closest O3-level signal for a front-end bubble.
+        if ((decodeStatus[tid] == Running || decodeStatus[tid] == Idle) &&
+            insts[tid].empty()) {
+            if (const auto req = cpu->icacheStallRequest(tid))
+                cpu->ppDecodeIcacheStall->notify(req);
+        }
     }
 
     if (status_change) {

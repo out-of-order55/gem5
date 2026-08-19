@@ -227,6 +227,11 @@ class CacheHierarchy(PrivateL1PrivateL2CacheHierarchy):
                 )
                 self.l1icaches[i].prefetcher.prefetchers.append(pf)
             elif args.pdip == "on":
+                fdip = FetchDirectedPrefetcher(
+                    use_virtual_addresses=True, cpu=cpu
+                )
+                fdip.registerCache(self.l1icaches[i])
+                self.l1icaches[i].prefetcher.prefetchers.append(fdip)
                 pf = PriorityDirectedPrefetcher(
                     use_virtual_addresses=False,
                     cpu=cpu,

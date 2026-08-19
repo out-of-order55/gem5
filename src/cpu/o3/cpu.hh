@@ -195,8 +195,15 @@ class CPU : public BaseCPU
         return ftq.physicalCapacity();
     }
 
+    RequestPtr
+    icacheStallRequest(ThreadID tid) const
+    {
+        return fetch.icacheStallRequest(tid);
+    }
+
     ProbePointArg<PacketPtr> *ppInstAccessComplete;
     ProbePointArg<std::pair<DynInstPtr, PacketPtr> > *ppDataAccessComplete;
+    ProbePointArg<RequestPtr> *ppDecodeIcacheStall;
 
     /** Register probe points. */
     void regProbePoints() override;

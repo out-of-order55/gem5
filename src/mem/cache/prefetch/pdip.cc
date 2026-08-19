@@ -22,7 +22,7 @@ PriorityDirectedPrefetcher::PriorityDirectedPrefetcher(const Params &p)
       targetAddressBits(p.target_address_bits),
       targetsPerEntry(p.targets_per_entry), targetMaskBits(p.target_mask_bits),
       trainingProbability(p.training_probability), minFreeMSHRs(p.min_free_mshrs),
-      highCost(cyclesToTicks(Cycles(p.high_cost_cycles))),
+      highCostCycles(p.high_cost_cycles),
       requireBackendStall(p.require_backend_stall),
       ignoreReturns(p.ignore_returns), markReqAsPrefetch(p.mark_req_as_prefetch),
       squashPrefetches(p.squash_prefetches), cacheSnoop(p.cache_snoop),
@@ -275,7 +275,7 @@ PriorityDirectedPrefetcher::finalizeFEC(FTQState &state, Addr retired_pc)
         retirePendingMiss(miss.pc);
         stats.finalizedFECs++;
         stats.retiredMisses++;
-        const bool high_cost = curTick() - miss.missTick >= highCost;
+        const bool high_cost = miss.decodeStallCycles >= highCostCycles;
         if (!high_cost) {
             stats.filteredLowCost++;
             continue;
@@ -395,6 +395,46 @@ PriorityDirectedPrefetcher::notifyCacheMiss(const CacheAccessProbeArg &arg)
     stats.missesUnmatchedFTQ++;
 }
 
+PriorityDirectedPrefetcher::MissState *
+PriorityDirectedPrefetcher::findDecodeStallMiss(const RequestPtr &req)
+{
+    if (!req)
+        return nullptr;
+
+    const Addr pc = blockAddress(req->getPC());
+    const Addr address = blockAddress(req->getPaddr());
+    auto match = [pc, address](FTQState &state) -> MissState * {
+        for (auto &miss : state.misses) {
+            if (!miss.finalized && miss.pc == pc && miss.address == address)
+                return &miss;
+        }
+        return nullptr;
+    };
+
+    for (auto &entry : ftqs) {
+        if (auto *miss = match(entry.second))
+            return miss;
+    }
+    for (auto it = recentFtqs.rbegin(); it != recentFtqs.rend(); ++it) {
+        if (auto *miss = match(*it))
+            return miss;
+    }
+    return nullptr;
+}
+
+void
+PriorityDirectedPrefetcher::notifyDecodeIcacheStall(const RequestPtr &req)
+{
+    if (!enabled)
+        return;
+
+    if (auto *miss = findDecodeStallMiss(req)) {
+        ++miss->decodeStallCycles;
+        miss->lastDecodeStallTick = curTick();
+        stats.decodeStallEvents++;
+    }
+}
+
 PriorityDirectedPrefetcher::FTQState *
 PriorityDirectedPrefetcher::findFTQ(Addr pc, ThreadID tid)
 {
@@ -487,8 +527,9 @@ PriorityDirectedPrefetcher::notifyBackendStall(ThreadID tid)
         if (state.tid != tid)
             continue;
         for (auto &miss : state.misses) {
-            if (!miss.finalized &&
-                (!candidate || miss.missTick > candidate->missTick))
+            if (!miss.finalized && miss.decodeStallCycles != 0 &&
+                (!candidate || miss.lastDecodeStallTick >
+                    candidate->lastDecodeStallTick))
                 candidate = &miss;
         }
     }
@@ -496,8 +537,9 @@ PriorityDirectedPrefetcher::notifyBackendStall(ThreadID tid)
         if (it->tid != tid)
             continue;
         for (auto &miss : it->misses) {
-            if (!miss.finalized &&
-                (!candidate || miss.missTick > candidate->missTick))
+            if (!miss.finalized && miss.decodeStallCycles != 0 &&
+                (!candidate || miss.lastDecodeStallTick >
+                    candidate->lastDecodeStallTick))
                 candidate = &miss;
         }
     }
@@ -560,6 +602,11 @@ PriorityDirectedPrefetcher::regProbeListeners()
     using BackendStallListener = ProbeListenerArgFunc<ThreadID>;
     listeners.push_back(cpu->getProbeManager()->connect<BackendStallListener>(
         "BackendStall", [this](ThreadID tid) { notifyBackendStall(tid); }));
+    using DecodeStallListener = ProbeListenerArgFunc<RequestPtr>;
+    listeners.push_back(cpu->getProbeManager()->connect<DecodeStallListener>(
+        "DecodeIcacheStall", [this](const auto &req) {
+            notifyDecodeIcacheStall(req);
+        }));
     if (cache) {
         using CacheListener = ProbeListenerArgFunc<CacheAccessProbeArg>;
         listeners.push_back(cache->getProbeManager()->connect<CacheListener>("Miss",
@@ -591,9 +638,11 @@ PriorityDirectedPrefetcher::Stats::Stats(statistics::Group *parent)
       ADD_STAT(retiredMisses, statistics::units::Count::get(),
                "Instruction-cache misses whose line retired"),
       ADD_STAT(filteredLowCost, statistics::units::Count::get(),
-               "Retired misses below the FEC cost threshold"),
+               "Retired misses below the Decode stall threshold"),
+      ADD_STAT(decodeStallEvents, statistics::units::Count::get(),
+               "Decode starvation cycles attributed to demand I-cache misses"),
       ADD_STAT(filteredNoBackendStall, statistics::units::Count::get(),
-               "High-cost misses without an issue-queue-empty observation"),
+               "High-cost misses without a backend-stall observation"),
       ADD_STAT(resteerTriggers, statistics::units::Count::get(),
                "FEC blocks trained from a mispredict trigger"),
       ADD_STAT(lastTakenTriggers, statistics::units::Count::get(),

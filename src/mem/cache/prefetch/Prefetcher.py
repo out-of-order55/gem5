@@ -806,7 +806,9 @@ class PriorityDirectedPrefetcher(BasePrefetcher):
     target_mask_bits = Param.Unsigned(4, "Contiguous lines per target")
     training_probability = Param.Percent(25, "Probability of learning a target")
     min_free_mshrs = Param.Unsigned(2, "MSHRs reserved for demand fetches")
-    high_cost_cycles = Param.Unsigned(20, "Critical-stall threshold")
+    high_cost_cycles = Param.Unsigned(
+        20, "Decode-starvation cycles required for a high-cost FEC miss"
+    )
     require_backend_stall = Param.Bool(True, "Require backend stall for FEC")
     ignore_returns = Param.Bool(True, "Do not learn return-like triggers")
     latency = Param.Cycles(1, "Latency for generated prefetches")

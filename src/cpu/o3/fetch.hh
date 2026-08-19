@@ -215,6 +215,12 @@ class Fetch
     /** Returns the name of fetch. */
     std::string name() const;
 
+    /** Return the demand instruction request currently waiting on the cache. */
+    RequestPtr icacheStallRequest(ThreadID tid) const
+    {
+        return fetchStatus[tid] == IcacheWaitResponse ? memReq[tid] : nullptr;
+    }
+
 
     /** Registers probes. */
     void regProbePoints();

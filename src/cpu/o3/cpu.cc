@@ -332,6 +332,8 @@ CPU::regProbePoints()
     ppDataAccessComplete = new ProbePointArg<
         std::pair<DynInstPtr, PacketPtr>>(
                 getProbeManager(), "DataAccessComplete");
+    ppDecodeIcacheStall = new ProbePointArg<RequestPtr>(
+            getProbeManager(), "DecodeIcacheStall");
 
     ftq.regProbePoints();
     bac.regProbePoints();

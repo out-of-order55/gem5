@@ -65,7 +65,11 @@ class PriorityDirectedPrefetcher : public Base
         Addr pc = MaxAddr;
         Addr address = MaxAddr;
         Tick missTick = MaxTick;
+        // Decode starvation is charged only while this demand miss is the
+        // request blocking the O3 fetch stage.
         bool backendStalled = false;
+        unsigned decodeStallCycles = 0;
+        Tick lastDecodeStallTick = 0;
         bool finalized = false;
     };
     struct FTQState {
@@ -92,6 +96,7 @@ class PriorityDirectedPrefetcher : public Base
     void notifyFTQRemove(const o3::FetchTargetPtr &ft);
     void notifyFTQSquash(const o3::FetchTargetPtr &ft);
     void notifyCacheMiss(const CacheAccessProbeArg &arg);
+    void notifyDecodeIcacheStall(const RequestPtr &req);
     void notifyMispredict(const o3::DynInstPtr &inst);
     void notifyCommit(const o3::DynInstPtr &inst);
     void notifyBackendStall(ThreadID tid);
@@ -104,6 +109,7 @@ class PriorityDirectedPrefetcher : public Base
     void issueTargets(Addr trigger, ThreadID tid, o3::FTSeqNum ftn);
     void enqueue(Addr address, ThreadID tid, o3::FTSeqNum ftn);
     void train(Addr trigger, Addr target);
+    MissState *findDecodeStallMiss(const RequestPtr &req);
     Entry *find(Addr trigger);
     const Entry *find(Addr trigger) const;
     size_t setIndex(Addr trigger) const;
@@ -122,7 +128,7 @@ class PriorityDirectedPrefetcher : public Base
     const unsigned targetMaskBits;
     const unsigned trainingProbability;
     const unsigned minFreeMSHRs;
-    const Tick highCost;
+    const unsigned highCostCycles;
     const bool requireBackendStall;
     const bool ignoreReturns;
     const bool markReqAsPrefetch;
@@ -168,6 +174,7 @@ class PriorityDirectedPrefetcher : public Base
         statistics::Scalar finalizedFECs;
         statistics::Scalar retiredMisses;
         statistics::Scalar filteredLowCost;
+        statistics::Scalar decodeStallEvents;
         statistics::Scalar filteredNoBackendStall;
         statistics::Scalar resteerTriggers;
         statistics::Scalar lastTakenTriggers;
