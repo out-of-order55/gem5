@@ -42,6 +42,8 @@ class PriorityDirectedPrefetcher : public Base
 
     void regProbeListeners() override;
     void setCache(BaseCache *_cache) { cache = _cache; }
+    /** Register the lower cache that retains FEC lines for EMISSARY. */
+    void setFECCache(BaseCache *_cache) { fecCache = _cache; }
     PacketPtr getPacket() override;
     Tick nextPrefetchReadyTime() const override;
     void notify(const CacheAccessProbeArg &, const PrefetchInfo &) override {}
@@ -99,7 +101,7 @@ class PriorityDirectedPrefetcher : public Base
     void notifyDecodeIcacheStall(const RequestPtr &req);
     void notifyMispredict(const o3::DynInstPtr &inst);
     void notifyCommit(const o3::DynInstPtr &inst);
-    void notifyBackendStall(ThreadID tid);
+    void notifyBackendStall(const RequestPtr &req);
     void finalizeFEC(FTQState &state, Addr retiredPC);
     void retirePendingMiss(Addr pc);
     void discardPendingMisses(const FTQState &state);
@@ -115,11 +117,14 @@ class PriorityDirectedPrefetcher : public Base
     size_t setIndex(Addr trigger) const;
     Addr tag(Addr trigger) const;
     bool sample(unsigned probability);
+    bool promoteFEC();
 
     std::vector<ProbeListenerPtr<>> listeners;
     BaseCPU *cpu;
     BaseCache *cache;
+    BaseCache *fecCache;
     const bool enabled;
+    const bool monitorOnly;
     const unsigned tableSets;
     const unsigned tableAssoc;
     const unsigned tagBits;
@@ -129,6 +134,7 @@ class PriorityDirectedPrefetcher : public Base
     const unsigned trainingProbability;
     const unsigned minFreeMSHRs;
     const unsigned highCostCycles;
+    const unsigned fecPromotionDenominator;
     const bool requireBackendStall;
     const bool ignoreReturns;
     const bool markReqAsPrefetch;
@@ -173,6 +179,7 @@ class PriorityDirectedPrefetcher : public Base
         statistics::Scalar missesUnmatchedFTQ;
         statistics::Scalar finalizedFECs;
         statistics::Scalar retiredMisses;
+        statistics::Scalar filteredNoDecodeStall;
         statistics::Scalar filteredLowCost;
         statistics::Scalar decodeStallEvents;
         statistics::Scalar filteredNoBackendStall;
@@ -185,6 +192,8 @@ class PriorityDirectedPrefetcher : public Base
         statistics::Scalar predictorMisses;
         statistics::Scalar candidates;
         statistics::Scalar issued;
+        statistics::Scalar issuedResteerTargets;
+        statistics::Scalar issuedLastTakenTargets;
         statistics::Scalar squashed;
         statistics::Scalar droppedCacheSnoop;
         statistics::Scalar droppedMSHR;

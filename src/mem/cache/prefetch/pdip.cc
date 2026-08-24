@@ -17,12 +17,14 @@ namespace prefetch
 {
 
 PriorityDirectedPrefetcher::PriorityDirectedPrefetcher(const Params &p)
-    : Base(p), cpu(p.cpu), cache(nullptr), enabled(p.enabled),
+    : Base(p), cpu(p.cpu), cache(nullptr), fecCache(nullptr), enabled(p.enabled),
+      monitorOnly(p.monitor_only),
       tableSets(p.table_sets), tableAssoc(p.table_assoc), tagBits(p.tag_bits),
       targetAddressBits(p.target_address_bits),
       targetsPerEntry(p.targets_per_entry), targetMaskBits(p.target_mask_bits),
       trainingProbability(p.training_probability), minFreeMSHRs(p.min_free_mshrs),
       highCostCycles(p.high_cost_cycles),
+      fecPromotionDenominator(p.fec_promotion_denominator),
       requireBackendStall(p.require_backend_stall),
       ignoreReturns(p.ignore_returns), markReqAsPrefetch(p.mark_req_as_prefetch),
       squashPrefetches(p.squash_prefetches), cacheSnoop(p.cache_snoop),
@@ -39,6 +41,8 @@ PriorityDirectedPrefetcher::PriorityDirectedPrefetcher(const Params &p)
              "PDIP target_mask_bits must be in [1, 63]");
     fatal_if((tableSets & (tableSets - 1)) != 0,
              "PDIP table_sets must be a power of two");
+    fatal_if(fecPromotionDenominator == 0,
+             "PDIP fec_promotion_denominator must be non-zero");
     resteerTriggers.fill(MaxAddr);
     resteerWindows.fill(0);
     lastTakenBranches.fill(MaxAddr);
@@ -92,6 +96,12 @@ PriorityDirectedPrefetcher::sample(unsigned probability)
 {
     return probability == 100 ||
            (probability != 0 && rng->random<unsigned>(0, 99) < probability);
+}
+
+bool
+PriorityDirectedPrefetcher::promoteFEC()
+{
+    return rng->random<unsigned>(0, fecPromotionDenominator - 1) == 0;
 }
 
 void
@@ -174,12 +184,20 @@ PriorityDirectedPrefetcher::enqueue(Addr address, ThreadID tid, o3::FTSeqNum ftn
     pfq.emplace_back(*this, address, tid, ftn);
     pfq.back().createPkt();
     pfq.back().readyTime = curTick() + latency;
+    if (auto *state = findFTQByNum(ftn, tid)) {
+        if (state->resteerPath)
+            stats.issuedResteerTargets++;
+        else
+            stats.issuedLastTakenTargets++;
+    }
 }
 
 void
 PriorityDirectedPrefetcher::issueTargets(Addr trigger, ThreadID tid,
                                          o3::FTSeqNum ftn)
 {
+    if (monitorOnly)
+        return;
     stats.tableLookups++;
     Entry *entry = find(trigger);
     if (!entry) {
@@ -273,9 +291,27 @@ PriorityDirectedPrefetcher::finalizeFEC(FTQState &state, Addr retired_pc)
 
         miss.finalized = true;
         retirePendingMiss(miss.pc);
-        stats.finalizedFECs++;
         stats.retiredMisses++;
-        const bool high_cost = miss.decodeStallCycles >= highCostCycles;
+        // The paper defines an FEC as a correct-path retired L1I miss that
+        // actually exposed one or more front-end bubbles. High cost and
+        // IQ-empty are stricter filters for PDIP-table training, not for the
+        // FEC classification itself.
+        if (miss.decodeStallCycles == 0) {
+            stats.filteredNoDecodeStall++;
+            continue;
+        }
+        stats.finalizedFECs++;
+        if (cache)
+            cache->markFEC(miss.address, false);
+        // FEC metadata is shared by PDIP and EMISSARY. The line is promoted
+        // only after retirement confirms it as an FEC, never merely because
+        // PDIP predicted it as a future target.
+        if (fecCache)
+            fecCache->markFEC(miss.address, false, promoteFEC());
+
+        // PDIP calls an FEC high-cost only when it causes more than ten
+        // decode-starvation cycles (not ten or more).
+        const bool high_cost = miss.decodeStallCycles > highCostCycles;
         if (!high_cost) {
             stats.filteredLowCost++;
             continue;
@@ -285,6 +321,8 @@ PriorityDirectedPrefetcher::finalizeFEC(FTQState &state, Addr retired_pc)
             continue;
         }
         if (state.trigger == MaxAddr)
+            continue;
+        if (monitorOnly)
             continue;
         stats.criticalBlocks++;
         if (state.resteerPath)
@@ -352,12 +390,16 @@ PriorityDirectedPrefetcher::notifyCacheMiss(const CacheAccessProbeArg &arg)
     // FTQ ranges are virtual instruction PCs. The packet address has already
     // been translated to physical by the time the L1I emits its miss probe,
     // so use the request PC to compare addresses in the same domain.
-    const Addr block = blockAddress(arg.pkt->req->getPC());
-    const Addr paddr = blockAddress(arg.pkt->req->getPaddr());
+    const auto &req = arg.pkt->req;
+    const ThreadID tid = req->hasContextId() ?
+        cpu->contextToThread(req->contextId()) : InvalidThreadID;
+    const Addr block = blockAddress(req->getPC());
+    const Addr paddr = blockAddress(req->getPaddr());
     FTQState *matched_state = nullptr;
     for (auto &entry : ftqs) {
         auto &state = entry.second;
-        if (block >= state.start && block <= state.end) {
+        if ((tid == InvalidThreadID || state.tid == tid) &&
+            block >= state.start && block <= state.end) {
             matched_state = &state;
             break;
         }
@@ -378,7 +420,8 @@ PriorityDirectedPrefetcher::notifyCacheMiss(const CacheAccessProbeArg &arg)
     // The FTQ entry may have been popped before this asynchronous cache miss
     // reaches the probe. Prefer the newest matching consumed entry.
     for (auto state = recentFtqs.rbegin(); state != recentFtqs.rend(); ++state) {
-        if (block >= state->start && block <= state->end) {
+        if ((tid == InvalidThreadID || state->tid == tid) &&
+            block >= state->start && block <= state->end) {
             const auto known = std::find_if(state->misses.begin(),
                 state->misses.end(), [block](const MissState &miss) {
                     return miss.pc == block;
@@ -401,9 +444,13 @@ PriorityDirectedPrefetcher::findDecodeStallMiss(const RequestPtr &req)
     if (!req)
         return nullptr;
 
+    const ThreadID tid = req->hasContextId() ?
+        cpu->contextToThread(req->contextId()) : InvalidThreadID;
     const Addr pc = blockAddress(req->getPC());
     const Addr address = blockAddress(req->getPaddr());
-    auto match = [pc, address](FTQState &state) -> MissState * {
+    auto match = [pc, address, tid](FTQState &state) -> MissState * {
+        if (tid != InvalidThreadID && state.tid != tid)
+            return nullptr;
         for (auto &miss : state.misses) {
             if (!miss.finalized && miss.pc == pc && miss.address == address)
                 return &miss;
@@ -516,35 +563,16 @@ PriorityDirectedPrefetcher::notifyCommit(const o3::DynInstPtr &inst)
 }
 
 void
-PriorityDirectedPrefetcher::notifyBackendStall(ThreadID tid)
+PriorityDirectedPrefetcher::notifyBackendStall(const RequestPtr &req)
 {
-    if (!enabled)
+    if (!enabled || !req)
         return;
 
-    MissState *candidate = nullptr;
-    for (auto &entry : ftqs) {
-        auto &state = entry.second;
-        if (state.tid != tid)
-            continue;
-        for (auto &miss : state.misses) {
-            if (!miss.finalized && miss.decodeStallCycles != 0 &&
-                (!candidate || miss.lastDecodeStallTick >
-                    candidate->lastDecodeStallTick))
-                candidate = &miss;
-        }
-    }
-    for (auto it = recentFtqs.rbegin(); it != recentFtqs.rend(); ++it) {
-        if (it->tid != tid)
-            continue;
-        for (auto &miss : it->misses) {
-            if (!miss.finalized && miss.decodeStallCycles != 0 &&
-                (!candidate || miss.lastDecodeStallTick >
-                    candidate->lastDecodeStallTick))
-                candidate = &miss;
-        }
-    }
-    if (candidate)
-        candidate->backendStalled = true;
+    // The IQ-empty notification carries the request currently starving the
+    // front end. This avoids assigning a back-end stall to an unrelated,
+    // merely recent I-cache miss.
+    if (auto *miss = findDecodeStallMiss(req))
+        miss->backendStalled = true;
 }
 
 PacketPtr
@@ -568,7 +596,6 @@ PriorityDirectedPrefetcher::PrefetchRequest::PrefetchRequest(
         _owner.requestorId);
     if (_owner.markReqAsPrefetch)
         req->setFlags(Request::PREFETCH);
-    req->setFlags(Request::PDIP_FEC);
 }
 
 void
@@ -599,9 +626,9 @@ PriorityDirectedPrefetcher::regProbeListeners()
         [this](const auto &inst) { notifyMispredict(inst); }));
     listeners.push_back(cpu->getProbeManager()->connect<InstListener>("Commit",
         [this](const auto &inst) { notifyCommit(inst); }));
-    using BackendStallListener = ProbeListenerArgFunc<ThreadID>;
+    using BackendStallListener = ProbeListenerArgFunc<RequestPtr>;
     listeners.push_back(cpu->getProbeManager()->connect<BackendStallListener>(
-        "BackendStall", [this](ThreadID tid) { notifyBackendStall(tid); }));
+        "BackendStall", [this](const auto &req) { notifyBackendStall(req); }));
     using DecodeStallListener = ProbeListenerArgFunc<RequestPtr>;
     listeners.push_back(cpu->getProbeManager()->connect<DecodeStallListener>(
         "DecodeIcacheStall", [this](const auto &req) {
@@ -634,11 +661,13 @@ PriorityDirectedPrefetcher::Stats::Stats(statistics::Group *parent)
       ADD_STAT(missesUnmatchedFTQ, statistics::units::Count::get(),
                "Instruction-cache misses not matched to a live FTQ entry"),
       ADD_STAT(finalizedFECs, statistics::units::Count::get(),
-               "Retired cache-line misses finalized for PDIP training"),
+               "Correct-path retired L1I misses that caused decode starvation"),
       ADD_STAT(retiredMisses, statistics::units::Count::get(),
                "Instruction-cache misses whose line retired"),
+      ADD_STAT(filteredNoDecodeStall, statistics::units::Count::get(),
+               "Retired misses that caused no decode starvation"),
       ADD_STAT(filteredLowCost, statistics::units::Count::get(),
-               "Retired misses below the Decode stall threshold"),
+               "FECs not exceeding the high-cost decode-stall threshold"),
       ADD_STAT(decodeStallEvents, statistics::units::Count::get(),
                "Decode starvation cycles attributed to demand I-cache misses"),
       ADD_STAT(filteredNoBackendStall, statistics::units::Count::get(),
@@ -655,6 +684,10 @@ PriorityDirectedPrefetcher::Stats::Stats(statistics::Group *parent)
       ADD_STAT(predictorMisses, statistics::units::Count::get(), "Predictor misses"),
       ADD_STAT(candidates, statistics::units::Count::get(), "Candidate lines"),
       ADD_STAT(issued, statistics::units::Count::get(), "Issued PDIP prefetches"),
+      ADD_STAT(issuedResteerTargets, statistics::units::Count::get(),
+               "Issued targets associated with mispredict triggers"),
+      ADD_STAT(issuedLastTakenTargets, statistics::units::Count::get(),
+               "Issued targets associated with last-taken triggers"),
       ADD_STAT(squashed, statistics::units::Count::get(), "Canceled PDIP requests"),
       ADD_STAT(droppedCacheSnoop, statistics::units::Count::get(),
                "Candidates already present in the cache or an MSHR"),

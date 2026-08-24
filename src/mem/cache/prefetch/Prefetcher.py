@@ -778,15 +778,18 @@ class PriorityDirectedPrefetcher(BasePrefetcher):
     type = "PriorityDirectedPrefetcher"
     cxx_class = "gem5::prefetch::PriorityDirectedPrefetcher"
     cxx_header = "mem/cache/prefetch/pdip.hh"
-    cxx_exports = [PyBindMethod("setCache")]
+    cxx_exports = [PyBindMethod("setCache"), PyBindMethod("setFECCache")]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._cache = None
+        self._fec_cache = None
 
     def regProbeListeners(self):
         if self._cache:
             self.getCCObject().setCache(self._cache.getCCObject())
+        if self._fec_cache:
+            self.getCCObject().setFECCache(self._fec_cache.getCCObject())
         super().regProbeListeners()
 
     def registerCache(self, simObj):
@@ -794,7 +797,15 @@ class PriorityDirectedPrefetcher(BasePrefetcher):
             raise TypeError("argument must be a SimObject type")
         self._cache = simObj
 
+    def registerFECCache(self, simObj):
+        if not isinstance(simObj, SimObject):
+            raise TypeError("argument must be a SimObject type")
+        self._fec_cache = simObj
+
     enabled = Param.Bool(True, "Enable PDIP training and issuance")
+    monitor_only = Param.Bool(
+        False, "Collect FEC statistics without training or issuing PDIP requests"
+    )
     cpu = Param.BaseCPU(Parent.any, "The O3 CPU supplying FTQ probes")
     table_sets = Param.Unsigned(512, "Number of predictor sets")
     table_assoc = Param.Unsigned(8, "Ways per predictor set")
@@ -807,9 +818,14 @@ class PriorityDirectedPrefetcher(BasePrefetcher):
     training_probability = Param.Percent(25, "Probability of learning a target")
     min_free_mshrs = Param.Unsigned(2, "MSHRs reserved for demand fetches")
     high_cost_cycles = Param.Unsigned(
-        20, "Decode-starvation cycles required for a high-cost FEC miss"
+        10, "Decode-starvation cycles exceeded by a high-cost FEC miss"
     )
-    require_backend_stall = Param.Bool(True, "Require backend stall for FEC")
+    fec_promotion_denominator = Param.Unsigned(
+        32, "Promote one out of this many retired FEC lines in the FEC cache"
+    )
+    require_backend_stall = Param.Bool(
+        True, "Require an IQ-empty observation to train from a high-cost FEC"
+    )
     ignore_returns = Param.Bool(True, "Do not learn return-like triggers")
     latency = Param.Cycles(1, "Latency for generated prefetches")
     pfq_size = Param.Unsigned(64, "Maximum queued prefetches")
